@@ -1,0 +1,6 @@
+# Validation manifest: which reference implementations the tests compare against.
+primitive = "libcrux reference primitives: SHA-256, HMAC-SHA256, HKDF-SHA256, AES-128, X25519"
+reference = "RustCrypto aes 0.8 (block-level AES-128), the official libcrux crates libcrux-sha2 / libcrux-hmac, and libcrux-lean-specs (libcrux_specs::fixed) used as oracles against the crate's own sha256_32 / hmac_sha256_32 / hkdf_extract_32 / aes128_encrypt / x25519::scalarmult; plus the verbatim NIST FIPS 197 Appendix B AES-128 vector"
+reference_kind = "independent-crate"
+test_files = ["tests/cross_check.rs"]
+notes = "cross_check.rs proptests (500-1000 cases each) the crate's own sha256_32 / hmac_sha256_32 / hkdf_extract_32 / aes128_encrypt against libcrux_specs::fixed (libcrux-lean-specs), libcrux_sha2::sha256, libcrux_hmac::hmac and RustCrypto aes::Aes128; checks x25519::scalarmult against libcrux_specs::fixed::x25519_scalarmult on one input; and asserts aes128_encrypt against the verbatim FIPS 197 App B vector (2b7e15…->3925841d…). Per-module known-answer tests from the cited standards live in the unit tests of each src/ module."

@@ -1,0 +1,26 @@
+[package]
+name = "libcrux-specs-hax"
+version = "0.1.0"
+edition = "2021"
+description = "Hax-extractable pure-Rust specifications of libcrux cryptographic primitives"
+license = "MIT"
+repository = "https://github.com/spitters/libcrux-specs-hax"
+readme = "README.md"
+keywords = ["cryptography", "hax", "specification", "libcrux", "formal-verification"]
+categories = ["cryptography"]
+
+[dependencies]
+
+[dev-dependencies]
+hex = "0.4"
+proptest = "1"
+# Upstream pure specs (source of 13 of the modules here), used as a test oracle
+libcrux-specs = { git = "https://github.com/spitters/libcrux-lean-specs.git" }
+# Official libcrux implementations (Apache-2.0), used only as test oracles
+libcrux-sha2 = "0.0.6"
+libcrux-hmac = "0.0.6"
+# RustCrypto AES, block-level oracle for aes128
+aes = "0.8"
+
+# Standalone workspace root so the crate builds outside any enclosing workspace.
+[workspace]
