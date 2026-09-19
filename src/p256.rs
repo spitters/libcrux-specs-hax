@@ -329,19 +329,22 @@ fn reduce_mod_p(c: &[u64; 8]) -> P256FieldElement {
         acc[3] as u64,
     ];
 
-    // Handle negative results: add p until positive.
-    // carry can be negative after subtraction.
+    // The value is r + carry * 2^256. While it is negative, add p: the
+    // carry out of the 256-bit addition is what moves into `carry`, so the
+    // value grows by exactly p.
     while carry < 0 {
-        let (s, _) = add256(&r, &P256_P);
+        let (s, carry_out) = add256(&r, &P256_P);
         r = s;
-        carry += 1;
+        carry += carry_out as i128;
     }
 
-    // Handle positive carry: subtract p.
+    // While the value is at least 2^256, subtract p: the borrow out of the
+    // 256-bit subtraction is what leaves `carry`, so the value shrinks by
+    // exactly p.
     while carry > 0 {
-        let (s, _) = sub256(&r, &P256_P);
+        let (s, borrow_out) = sub256(&r, &P256_P);
         r = s;
-        carry -= 1;
+        carry -= borrow_out as i128;
     }
 
     // Final reduction: ensure 0 <= r < p.
@@ -898,4 +901,61 @@ mod tests {
         assert_eq!(enc_sum, enc_g);
     }
 
+}
+
+#[cfg(test)]
+mod reduce_mod_p_carry_tests {
+    use super::{fp_from_bytes, fp_mul, fp_to_bytes};
+
+    /// Products for which the reduction's `±p` corrections do not wrap the
+    /// 256-bit value, so a correction that changes the top carry by one
+    /// regardless of the carry or borrow out is off by `2^256 mod p`.
+    const CASES: [(&str, &str, &str); 3] = [
+        (
+            "0000000000003e3aeb4ae1383562f4b82261d969f7ac94ca4000000000000000",
+            "ffffffff00000001000000000000000000000000fffffffffffffffffffffff5",
+            "fffffffefffd91b3cf1333cdea2270cea82d81dd534230197fffffffffffffff",
+        ),
+        (
+            "686b95dcf6d5d8c635d93577acc71d72b4586b734e04cc37a32794af9a2f0315",
+            "00000000000000000000000000109b608ff6c973d65b7511e36685291eeb9840",
+            "ffffffff00000001000000000000000000000000ffffffff61c8864680b583ea",
+        ),
+        (
+            "44e4a1a6f6c8338ac1b05ff7efab0b9acce5dfbdaf9de3f33392548d4e2f0aa1",
+            "000000000000000000000000057a6d688fe7a5f3ef14ab2a124e4849b3eeb840",
+            "ffffffff00000001000000000000000000000000fffffffbac7babed84f69b6c",
+        ),
+    ];
+
+    fn nibble(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => panic!("hex"),
+        }
+    }
+
+    fn from_hex(s: &str) -> [u8; 32] {
+        let b = s.as_bytes();
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[i] = (nibble(b[2 * i]) << 4) | nibble(b[2 * i + 1]);
+        }
+        out
+    }
+
+    fn to_hex(b: [u8; 32]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect()
+    }
+
+    #[test]
+    fn products_whose_corrections_do_not_wrap() {
+        for (a, b, ab) in CASES.iter() {
+            let x = fp_from_bytes(&from_hex(a));
+            let y = fp_from_bytes(&from_hex(b));
+            assert_eq!(to_hex(fp_to_bytes(fp_mul(x, y))), *ab, "a = {a}");
+            assert_eq!(to_hex(fp_to_bytes(fp_mul(y, x))), *ab, "a = {a}");
+        }
+    }
 }
