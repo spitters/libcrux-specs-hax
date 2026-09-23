@@ -4,3 +4,42 @@ reference = "RustCrypto aes 0.8 (block-level AES-128), the official libcrux crat
 reference_kind = "independent-crate"
 test_files = ["tests/cross_check.rs"]
 notes = "cross_check.rs proptests (500-1000 cases each) the crate's own sha256_32 / hmac_sha256_32 / hkdf_extract_32 / aes128_encrypt against libcrux_specs::fixed (libcrux-lean-specs), libcrux_sha2::sha256, libcrux_hmac::hmac and RustCrypto aes::Aes128; checks x25519::scalarmult against libcrux_specs::fixed::x25519_scalarmult on one input; and asserts aes128_encrypt against the verbatim FIPS 197 App B vector (2b7e15…->3925841d…). Per-module known-answer tests from the cited standards live in the unit tests of each src/ module."
+
+# Standards-body vectors for the group and hash-to-curve modules.
+[[standards_vectors]]
+module = "ristretto255"
+reference = "RFC 9496 Appendix A.1 (multiples of the generator), A.2 (invalid encodings), A.3 (element derivation), A.4 (SQRT_RATIO_M1)"
+reference_kind = "standards-body-vectors"
+test_files = ["tests/ristretto255_vectors.rs"]
+provenance = "https://www.rfc-editor.org/rfc/rfc9496.txt, fetched 2026-09-19; all vectors of Appendix A; the test file's hex strings equal the RFC's as a set (68 strings)"
+
+[[standards_vectors]]
+module = "hash_to_field"
+reference = "RFC 9380 Appendix K.1, K.2, K.3 (expand_message_xmd, SHA-256, SHA-256 with a long DST, SHA-512); u values of J.1.1, J.1.2, J.5.1, J.5.2"
+reference_kind = "standards-body-vectors"
+test_files = ["tests/hash_to_field_vectors.rs"]
+provenance = "https://www.rfc-editor.org/rfc/rfc9380.txt, fetched 2026-09-19; all 30 Appendix K vectors; tables generated from the RFC text with awk"
+
+[[standards_vectors]]
+module = "hash_to_curve25519"
+reference = "RFC 9380 Appendix J.4.1, J.4.2 (curve25519 RO, NU) and J.5.1, J.5.2 (edwards25519 RO, NU): u, Q0, Q1 or Q, and P for every message"
+reference_kind = "standards-body-vectors"
+test_files = ["tests/hash_to_curve25519_vectors.rs"]
+provenance = "https://www.rfc-editor.org/rfc/rfc9380.txt, fetched 2026-09-19; all vectors of the four suites; tables generated from the RFC text with awk"
+
+[[standards_vectors]]
+module = "hash_to_curve_p256"
+reference = "RFC 9380 Appendix J.1.1, J.1.2 (P256_XMD:SHA-256_SSWU_RO_, P256_XMD:SHA-256_SSWU_NU_): u, Q0, Q1 or Q, and P for every message"
+reference_kind = "standards-body-vectors"
+test_files = ["tests/hash_to_curve_p256_vectors.rs"]
+provenance = "https://www.rfc-editor.org/rfc/rfc9380.txt, fetched 2026-09-19; all 10 vectors of the two suites; tables generated from the RFC text with awk; the test file's 64-digit hex strings equal the RFC's as a multiset (65 strings)"
+
+# The fixed-base comb (src/ed25519_comb.rs). The comb computes the same
+# scalar multiple as the module's own double-and-add, so the published
+# key-generation vector pins it directly.
+[[standards_vectors]]
+module = "ed25519_comb"
+reference = "RFC 8032 Section 7.1, Test Vector 1: the public key of secret key 9d61b19d… is encode(a · B) for a the clamped low half of its SHA-512 hash"
+reference_kind = "standards-body-vectors"
+test_files = ["src/ed25519_comb.rs"]
+provenance = "https://www.rfc-editor.org/rfc/rfc8032.txt Section 7.1; the same vector ed25519::test_rfc8032_vector1_keygen drives through scalar_mult, taken here through comb_walk. The module's other tests are internal: comb_walk against edwards25519::scalar_mult on 16 splitmix64 scalars and on the zero, one and all-ones scalars, the digit decomposition against the scalar's bytes, and the full-scan select against a direct index."

@@ -6,6 +6,8 @@
 //! AES-GCM combines AES in counter mode (CTR) for encryption with the
 //! GHASH universal hash function for authentication.
 
+use alloc::vec::Vec;
+
 use crate::aes;
 use crate::gf128;
 
@@ -94,22 +96,35 @@ fn build_ghash_input(aad: &[u8], ciphertext: &[u8]) -> Vec<u8> {
     input
 }
 
-/// Generic AES-GCM encryption using a caller-provided block cipher.
+/// One AES block encryption under the selected key: AES-256 with `k32` when
+/// `key256` holds, AES-128 with `k16` otherwise.
+fn gcm_block(key256: bool, k16: [u8; 16], k32: [u8; 32], block: [u8; 16]) -> [u8; 16] {
+    if key256 {
+        aes::aes256_encrypt(k32, block)
+    } else {
+        aes::aes128_encrypt(k16, block)
+    }
+}
+
+/// AES-GCM encryption for either key size.
 ///
-/// key_encrypt: function that encrypts a single 16-byte block under the key.
+/// key256 selects AES-256 with key k32; otherwise AES-128 with key k16. The
+/// key that is not selected is ignored.
 /// nonce: 12-byte nonce (IV).
 /// aad: additional authenticated data (not encrypted, but authenticated).
 /// plaintext: data to encrypt and authenticate.
 ///
 /// Returns (ciphertext, tag).
 fn aes_gcm_encrypt_generic(
-    key_encrypt: impl Fn([u8; 16]) -> [u8; 16],
+    key256: bool,
+    k16: [u8; 16],
+    k32: [u8; 32],
     nonce: &[u8; 12],
     aad: &[u8],
     plaintext: &[u8],
 ) -> (Vec<u8>, [u8; 16]) {
     // Step 1: H = AES_K(0^128) — hash subkey
-    let h_bytes = key_encrypt([0u8; 16]);
+    let h_bytes = gcm_block(key256, k16, k32, [0u8; 16]);
     let h = gf128::bytes_to_u128(&h_bytes);
 
     // Step 2: J0 = nonce || 0x00000001 — initial counter block (for 96-bit nonce)
@@ -132,7 +147,7 @@ fn aes_gcm_encrypt_generic(
     i = 0;
     while i < num_blocks {
         counter = inc32(counter);
-        let keystream = key_encrypt(counter);
+        let keystream = gcm_block(key256, k16, k32, counter);
 
         let block_start = i * 16;
         let block_end = if block_start + 16 > plaintext.len() {
@@ -156,7 +171,7 @@ fn aes_gcm_encrypt_generic(
     let s = gf128::ghash(h, &ghash_input);
 
     // Step 5: Tag = AES_K(J0) XOR S
-    let encrypted_j0 = key_encrypt(j0);
+    let encrypted_j0 = gcm_block(key256, k16, k32, j0);
     let encrypted_j0_val = gf128::bytes_to_u128(&encrypted_j0);
     let tag_val = encrypted_j0_val ^ s;
     let tag = gf128::u128_to_bytes(tag_val);
@@ -164,18 +179,20 @@ fn aes_gcm_encrypt_generic(
     (ciphertext, tag)
 }
 
-/// Generic AES-GCM decryption using a caller-provided block cipher.
+/// AES-GCM decryption for either key size.
 ///
 /// Returns Some(plaintext) if the tag is valid, None otherwise.
 fn aes_gcm_decrypt_generic(
-    key_encrypt: impl Fn([u8; 16]) -> [u8; 16],
+    key256: bool,
+    k16: [u8; 16],
+    k32: [u8; 32],
     nonce: &[u8; 12],
     aad: &[u8],
     ciphertext: &[u8],
     tag: &[u8; 16],
 ) -> Option<Vec<u8>> {
     // Step 1: H = AES_K(0^128) — hash subkey
-    let h_bytes = key_encrypt([0u8; 16]);
+    let h_bytes = gcm_block(key256, k16, k32, [0u8; 16]);
     let h = gf128::bytes_to_u128(&h_bytes);
 
     // Step 2: J0 = nonce || 0x00000001
@@ -194,7 +211,7 @@ fn aes_gcm_decrypt_generic(
     let ghash_input = build_ghash_input(aad, ciphertext);
     let s = gf128::ghash(h, &ghash_input);
 
-    let encrypted_j0 = key_encrypt(j0);
+    let encrypted_j0 = gcm_block(key256, k16, k32, j0);
     let encrypted_j0_val = gf128::bytes_to_u128(&encrypted_j0);
     let expected_tag_val = encrypted_j0_val ^ s;
     let expected_tag = gf128::u128_to_bytes(expected_tag_val);
@@ -221,7 +238,7 @@ fn aes_gcm_decrypt_generic(
     i = 0;
     while i < num_blocks {
         counter = inc32(counter);
-        let keystream = key_encrypt(counter);
+        let keystream = gcm_block(key256, k16, k32, counter);
 
         let block_start = i * 16;
         let block_end = if block_start + 16 > ciphertext.len() {
@@ -254,9 +271,10 @@ pub fn aes128_gcm_encrypt(
     aad: &[u8],
     plaintext: &[u8],
 ) -> (Vec<u8>, [u8; 16]) {
-    let k = *key;
     aes_gcm_encrypt_generic(
-        |block| aes::aes128_encrypt(k, block),
+        false,
+        *key,
+        [0u8; 32],
         nonce,
         aad,
         plaintext,
@@ -273,9 +291,10 @@ pub fn aes128_gcm_decrypt(
     ciphertext: &[u8],
     tag: &[u8; 16],
 ) -> Option<Vec<u8>> {
-    let k = *key;
     aes_gcm_decrypt_generic(
-        |block| aes::aes128_encrypt(k, block),
+        false,
+        *key,
+        [0u8; 32],
         nonce,
         aad,
         ciphertext,
@@ -294,9 +313,10 @@ pub fn aes256_gcm_encrypt(
     aad: &[u8],
     plaintext: &[u8],
 ) -> (Vec<u8>, [u8; 16]) {
-    let k = *key;
     aes_gcm_encrypt_generic(
-        |block| aes::aes256_encrypt(k, block),
+        true,
+        [0u8; 16],
+        *key,
         nonce,
         aad,
         plaintext,
@@ -313,9 +333,10 @@ pub fn aes256_gcm_decrypt(
     ciphertext: &[u8],
     tag: &[u8; 16],
 ) -> Option<Vec<u8>> {
-    let k = *key;
     aes_gcm_decrypt_generic(
-        |block| aes::aes256_encrypt(k, block),
+        true,
+        [0u8; 16],
+        *key,
         nonce,
         aad,
         ciphertext,

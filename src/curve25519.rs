@@ -26,7 +26,11 @@ pub fn fe_one() -> [u64; 5] {
 }
 
 /// Propagate carries across limbs, reducing mod p = 2^255 - 19.
-/// After this, each limb is at most 51 bits.
+///
+/// For limbs below 2^63 the result has limbs 0, 2, 3, 4 below 2^51 and limb 1
+/// at most 2^51: the carry out of limb 4 is folded into limb 0 and its carry
+/// into limb 1, which is not masked again. A second `fe_carry` brings every
+/// limb below 2^51.
 pub fn fe_carry(a: [u64; 5]) -> [u64; 5] {
     let mut r = a;
 
@@ -76,6 +80,9 @@ pub fn fe_add(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
 /// 2*p = 2*(2^255 - 19) in 51-bit limbs =
 ///   [2*(2^51-19), 2*(2^51-1), 2*(2^51-1), 2*(2^51-1), 2*(2^51-1)]
 /// = [2^52 - 38,   2^52 - 2,   2^52 - 2,   2^52 - 2,   2^52 - 2]
+///
+/// The limbs of `b` must not exceed the bias: limbs below 2^51 + 2^9, the range
+/// of `fe_mul` and `fe_carry`, are within it. The limbs of `a` are below 2^62.
 pub fn fe_sub(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
     fe_carry([
         a[0] + 0xFFFFFFFFFFFDA - b[0], // + 2^52 - 38
@@ -90,6 +97,9 @@ pub fn fe_sub(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
 ///
 /// Reduction uses 2^255 = 19 (mod p): when a product lands in limb >= 5,
 /// it wraps to limb (i-5) with a factor of 19.
+///
+/// For limbs below 2^52 the result has limbs 0, 2, 3, 4 below 2^51 and limb 1
+/// below 2^51 + 2^9.
 pub fn fe_mul(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
     let b1_19 = 19u128 * (b[1] as u128);
     let b2_19 = 19u128 * (b[2] as u128);

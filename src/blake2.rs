@@ -6,6 +6,8 @@
 // Shared constants
 // ---------------------------------------------------------------------------
 
+use alloc::vec::Vec;
+
 /// Message schedule permutation table (10 standard permutations from RFC 7693).
 pub const SIGMA: [[usize; 16]; 10] = [
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
@@ -157,7 +159,9 @@ pub fn blake2b(msg: &[u8], key: &[u8], out_len: usize) -> Vec<u8> {
     let mut data: Vec<u8> = if key_len > 0 {
         let mut d = Vec::with_capacity(BLOCK_B + msg.len());
         d.extend_from_slice(key);
-        d.resize(BLOCK_B, 0);
+        for _i in key_len..BLOCK_B {
+            d.push(0u8);
+        }
         d.extend_from_slice(msg);
         d
     } else {
@@ -332,7 +336,9 @@ pub fn blake2s(msg: &[u8], key: &[u8], out_len: usize) -> Vec<u8> {
     let mut data: Vec<u8> = if key_len > 0 {
         let mut d = Vec::with_capacity(BLOCK_S + msg.len());
         d.extend_from_slice(key);
-        d.resize(BLOCK_S, 0);
+        for _i in key_len..BLOCK_S {
+            d.push(0u8);
+        }
         d.extend_from_slice(msg);
         d
     } else {

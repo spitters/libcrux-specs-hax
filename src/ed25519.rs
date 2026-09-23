@@ -5,6 +5,8 @@
 //!
 //! All functions are pure and value-passing.
 
+use alloc::vec::Vec;
+
 use crate::edwards25519::{
     ed25519_base_point, point_add, point_decode, point_encode, scalar_add, scalar_mult,
     scalar_mul_mod_l, scalar_reduce,

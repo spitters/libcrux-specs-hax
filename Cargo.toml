@@ -9,6 +9,13 @@ readme = "README.md"
 keywords = ["cryptography", "hax", "specification", "libcrux", "formal-verification"]
 categories = ["cryptography"]
 
+[features]
+default = ["std"]
+# The crate needs no operating system; `std` is the default so consumers and
+# the test harness are unaffected. Without it the eight modules holding a
+# `Vec` take it from `alloc`.
+std = []
+
 [dependencies]
 
 [dev-dependencies]

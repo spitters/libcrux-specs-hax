@@ -10,6 +10,8 @@
 // Keccak-f[1600] permutation (FIPS 202)
 // ---------------------------------------------------------------------------
 
+use alloc::vec::Vec;
+
 /// Keccak round constants (FIPS 202, Section 3.2.5).
 const RC: [u64; 24] = [
     0x0000000000000001, 0x0000000000008082,

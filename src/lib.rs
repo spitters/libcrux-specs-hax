@@ -7,6 +7,11 @@
 //! The `LibcruxCrypto` trait provides fixed-length wrappers over the modules;
 //! `ConcreteLibcrux` instantiates it with the specifications in this crate.
 
+// The crate needs no operating system. `std` stays the default so that
+// consumers and the test harness are unaffected; a target without it selects
+// `default-features = false`, and the eight modules that hold a `Vec` take it
+// from `alloc`.
+#![cfg_attr(not(feature = "std"), no_std)]
 #![allow(clippy::manual_memcpy)]
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::manual_repeat_n)]
@@ -24,6 +29,8 @@
 #![allow(unused_mut)]
 
 // Hash functions
+extern crate alloc;
+
 pub mod sha256;
 pub mod sha512;
 pub mod sha3;
@@ -32,6 +39,9 @@ pub mod blake2;
 // MACs, KDFs, stream cipher and AEAD
 pub mod hmac;
 pub mod hkdf;
+pub mod hash_to_field;
+pub mod hash_to_curve25519;
+pub mod hash_to_curve_p256;
 pub mod chacha20;
 pub mod poly1305;
 pub mod chacha20poly1305;
@@ -47,7 +57,10 @@ pub mod curve25519;
 pub mod x25519;
 pub mod p256;
 pub mod edwards25519;
+pub mod secret;
+pub mod ristretto255;
 pub mod ed25519;
+pub mod ed25519_comb;
 pub mod ecdsa_p256;
 
 /// Fixed-length (32-byte) wrappers over the primitive modules, so that

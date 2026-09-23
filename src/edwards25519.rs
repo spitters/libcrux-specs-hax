@@ -58,8 +58,8 @@ pub fn point_identity() -> EdPoint {
 
 /// The Edwards25519 base point B.
 ///
-/// Bx = 15112221349535807912866137220509078750507884956996801397853916694561507378526
-/// By = 46316835694926478169428394003475163141307993866256225615783033890098355573398
+/// Bx = 15112221349535400772501151409588531511454012693041857206046113283949847762202
+/// By = 46316835694926478169428394003475163141307993866256225615783033603165251855960
 pub fn ed25519_base_point() -> EdPoint {
     // Bx in little-endian bytes:
     // 0x216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a
@@ -507,7 +507,7 @@ fn sub_l(acc: &mut [u64; 5], l: &[u64; 4]) {
         let (r, b1) = acc[i].overflowing_sub(l[i]);
         let (r2, b2) = r.overflowing_sub(borrow);
         acc[i] = r2;
-        borrow = (b1 as u64) + (b2 as u64);
+        borrow = (if b1 { 1u64 } else { 0u64 }) + (if b2 { 1u64 } else { 0u64 });
         i += 1;
     }
     acc[4] = acc[4].wrapping_sub(borrow);

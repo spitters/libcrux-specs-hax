@@ -8,6 +8,8 @@
 //!
 //! No external dependencies. Uses `crate::hmac::hmac_sha256` for the MAC.
 
+use alloc::vec::Vec;
+
 use crate::hmac::hmac_sha256;
 
 /// SHA-256 output length in bytes.
@@ -19,12 +21,11 @@ pub const HASH_LEN: usize = 32;
 /// (per RFC 5869, Section 2.2).
 pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> [u8; 32] {
     let default_salt = [0u8; HASH_LEN];
-    let actual_salt = if salt.is_empty() {
-        &default_salt[..]
+    if salt.is_empty() {
+        hmac_sha256(&default_salt, ikm)
     } else {
-        salt
-    };
-    hmac_sha256(actual_salt, ikm)
+        hmac_sha256(salt, ikm)
+    }
 }
 
 /// HKDF-Expand: derive `length` bytes of output keying material from PRK and info.

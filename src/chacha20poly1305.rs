@@ -10,6 +10,8 @@
 //!
 //! No external dependencies. Uses `crate::chacha20` and `crate::poly1305`.
 
+use alloc::vec::Vec;
+
 use crate::chacha20::{chacha20_block, chacha20_encrypt};
 use crate::poly1305::poly1305;
 

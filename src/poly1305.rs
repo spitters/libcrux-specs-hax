@@ -38,7 +38,7 @@ pub struct U256 {
 
 /// The prime modulus p = 2^130 - 5.
 /// We store this symbolically and reduce using the identity: 2^130 = 5 (mod p).
-pub const P_LO: u128 = u128::MAX - 4; // 2^128 - 5
+pub const P_LO: u128 = 0xffff_ffff_ffff_ffff_ffff_ffff_ffff_fffb; // 2^128 - 5
 pub const P_HI: u8 = 3; // 2^130 - 5 = (2^128 - 5) + 3 * 2^128
 
 /// Clamp the r value per RFC 8439, Section 2.5.
@@ -100,7 +100,7 @@ pub fn num_to_le_bytes(value: u128) -> [u8; 16] {
 /// Result may have hi up to 7 (3 bits).
 pub fn u130_add(a: U130, b: U130) -> U130 {
     let (lo, carry) = a.lo.overflowing_add(b.lo);
-    let hi = a.hi + b.hi + (carry as u8);
+    let hi = a.hi + b.hi + (if carry { 1u8 } else { 0u8 });
     U130 { lo, hi }
 }
 
@@ -129,7 +129,7 @@ fn u128_mul(a: u128, b: u128) -> U256 {
     let (lo, carry1) = ll.overflowing_add(mid_lo);
     let hi = hh
         .wrapping_add(mid_hi)
-        .wrapping_add(carry1 as u128)
+        .wrapping_add(if carry1 { 1u128 } else { 0u128 })
         .wrapping_add(if mid_carry { 1u128 << 64 } else { 0 });
 
     U256 { lo, hi }
@@ -176,13 +176,13 @@ pub fn u130_mul_mod(acc: U130, r: u128) -> U130 {
 
     // Add high_times_5 to (base_lo, base_hi)
     let (sum_lo, c) = base_lo.overflowing_add(high_times_5);
-    let sum_hi = base_hi + (c as u8);
+    let sum_hi = base_hi + (if c { 1u8 } else { 0u8 });
 
     // One more partial reduction if sum_hi >= 4 (i.e., value >= 2^130)
     let extra = sum_hi >> 2; // how many times 2^130
     let final_hi = sum_hi & 3;
     let (final_lo, c2) = sum_lo.overflowing_add((extra as u128) * 5);
-    let final_hi2 = final_hi + (c2 as u8);
+    let final_hi2 = final_hi + (if c2 { 1u8 } else { 0u8 });
 
     U130 {
         lo: final_lo,
@@ -204,7 +204,7 @@ fn final_reduce(acc: U130) -> u128 {
 
     // Add 5 and check if it overflows past 2^130
     let (test_lo, c) = acc.lo.overflowing_add(5);
-    let test_hi = acc.hi + (c as u8);
+    let test_hi = acc.hi + (if c { 1u8 } else { 0u8 });
 
     if test_hi >= 4 {
         // acc + 5 >= 2^130, so acc >= 2^130 - 5 = p
@@ -290,6 +290,7 @@ pub fn poly1305(msg: &[u8], key: &[u8; 32]) -> [u8; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     /// RFC 8439, Section 2.5.2: Poly1305 test vector.
     /// Key (r||s):

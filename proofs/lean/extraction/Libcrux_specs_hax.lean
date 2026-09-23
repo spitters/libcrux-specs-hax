@@ -247,7 +247,9 @@ def compress (block : (RustArray u8 64)) (h_in : (RustArray u32 8)) :
 def sha256 (msg : (RustSlice u8)) : RustM (RustArray u8 32) := do
   let h : (RustArray u32 8) := HASH_INIT;
   let msg_len : usize ← (Core_models.Slice.Impl.len u8 msg);
-  let bit_len : u64 ← ((← (Rust_primitives.Hax.cast_op msg_len)) *? (8 : u64));
+  let bit_len : u64 ←
+    (Rust_primitives.Hax.cast_op
+      (← ((← (Rust_primitives.Hax.cast_op msg_len)) *? (8 : u128))));
   let num_full_blocks : usize ← (msg_len /? (64 : usize));
   let h : (RustArray u32 8) ←
     (Rust_primitives.Hax.Folds.fold_range
@@ -1291,7 +1293,7 @@ def iota (state : (RustArray u64 25)) (round : usize) :
       (← ((← result[(0 : usize)]_?) ^^^? (← RC[round]_?))));
   (pure result)
 
---  Keccak-f[1600] permutation: 24 rounds of theta, rho, pi, chi, iota.
+--  `Keccak-f[1600]` permutation: 24 rounds of theta, rho, pi, chi, iota.
 def keccak_f1600 (state : (RustArray u64 25)) : RustM (RustArray u64 25) := do
   let s : (RustArray u64 25) := state;
   let round : usize := (0 : usize);
@@ -2276,7 +2278,15 @@ def blake2b (msg : (RustSlice u8)) (key : (RustSlice u8)) (out_len : usize) :
       let d : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
         (Alloc.Vec.Impl_2.extend_from_slice u8 Alloc.Alloc.Global d key);
       let d : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
-        (Alloc.Vec.Impl_2.resize u8 Alloc.Alloc.Global d BLOCK_B (0 : u8));
+        (Rust_primitives.Hax.Folds.fold_range
+          key_len
+          BLOCK_B
+          (fun d _ => (do (pure true) : RustM Bool))
+          d
+          (fun d _i =>
+            (do
+            (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global d (0 : u8)) :
+            RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global))));
       let d : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
         (Alloc.Vec.Impl_2.extend_from_slice u8 Alloc.Alloc.Global d msg);
       (pure d)
@@ -2722,7 +2732,15 @@ def blake2s (msg : (RustSlice u8)) (key : (RustSlice u8)) (out_len : usize) :
       let d : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
         (Alloc.Vec.Impl_2.extend_from_slice u8 Alloc.Alloc.Global d key);
       let d : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
-        (Alloc.Vec.Impl_2.resize u8 Alloc.Alloc.Global d BLOCK_S (0 : u8));
+        (Rust_primitives.Hax.Folds.fold_range
+          key_len
+          BLOCK_S
+          (fun d _ => (do (pure true) : RustM Bool))
+          d
+          (fun d _i =>
+            (do
+            (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global d (0 : u8)) :
+            RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global))));
       let d : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
         (Alloc.Vec.Impl_2.extend_from_slice u8 Alloc.Alloc.Global d msg);
       (pure d)
@@ -2979,12 +2997,12 @@ def hkdf_extract (salt : (RustSlice u8)) (ikm : (RustSlice u8)) :
     RustM (RustArray u8 32) := do
   let default_salt : (RustArray u8 32) ←
     (Rust_primitives.Hax.repeat (0 : u8) (32 : usize));
-  let actual_salt : (RustSlice u8) ←
-    if (← (Core_models.Slice.Impl.is_empty u8 salt)) then
-      default_salt[Core_models.Ops.Range.RangeFull.mk]_?
-    else
-      (pure salt);
-  (Libcrux_specs_hax.Hmac.hmac_sha256 actual_salt ikm)
+  if (← (Core_models.Slice.Impl.is_empty u8 salt)) then
+    (Libcrux_specs_hax.Hmac.hmac_sha256
+      (← (Rust_primitives.unsize default_salt))
+      ikm)
+  else
+    (Libcrux_specs_hax.Hmac.hmac_sha256 salt ikm)
 
 --  HKDF-Expand: derive `length` bytes of output keying material from PRK and info.
 -- 
@@ -3124,6 +3142,667 @@ def hkdf_expand_32 (prk : (RustArray u8 32)) (info : (RustArray u8 32)) :
   (pure result)
 
 end Libcrux_specs_hax.Hkdf
+
+
+namespace Libcrux_specs_hax.Hash_to_field
+
+--  Largest DST length accepted by `expand_message_xmd` (RFC 9380, Section 5.3.1, step 2).
+def MAX_DST_LEN : usize := (255 : usize)
+
+--  Largest `len_in_bytes` accepted by `expand_message_xmd` (RFC 9380, Section 5.3.1, step 2).
+def MAX_LEN_IN_BYTES : usize := (65535 : usize)
+
+--  Largest block count `ell` accepted by `expand_message_xmd` (RFC 9380, Section 5.3.1, step 2).
+def MAX_ELL : usize := (255 : usize)
+
+--  SHA-256 output length b_in_bytes.
+def SHA256_B_IN_BYTES : usize := (32 : usize)
+
+--  SHA-256 input block length s_in_bytes.
+def SHA256_S_IN_BYTES : usize := (64 : usize)
+
+--  SHA-512 output length b_in_bytes.
+def SHA512_B_IN_BYTES : usize := (64 : usize)
+
+--  SHA-512 input block length s_in_bytes.
+def SHA512_S_IN_BYTES : usize := (128 : usize)
+
+--  The length L of RFC 9380, Section 5.2, for a 255- or 256-bit prime and
+--  k = 128: L = ceil((ceil(log2(p)) + k) / 8) = 48.
+def L_48 : usize := (48 : usize)
+
+--  The ASCII string "H2C-OVERSIZE-DST-" (RFC 9380, Section 5.3.3).
+def OVERSIZE_DST_PREFIX : (RustArray u8 17) :=
+  RustM.of_isOk
+    (do
+    #v[(72 : u8),
+         (50 : u8),
+         (67 : u8),
+         (45 : u8),
+         (79 : u8),
+         (86 : u8),
+         (69 : u8),
+         (82 : u8),
+         (83 : u8),
+         (73 : u8),
+         (90 : u8),
+         (69 : u8),
+         (45 : u8),
+         (68 : u8),
+         (83 : u8),
+         (84 : u8),
+         (45 : u8)])
+    (by rfl)
+
+--  `v || s`.
+def append (v : (Alloc.Vec.Vec u8 Alloc.Alloc.Global)) (s : (RustSlice u8)) :
+    RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global) := do
+  let r : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) := v;
+  let r : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      (← (Core_models.Slice.Impl.len u8 s))
+      (fun r _ => (do (pure true) : RustM Bool))
+      r
+      (fun r i =>
+        (do
+        (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global r (← s[i]_?)) :
+        RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global))));
+  (pure r)
+
+--  `v || I2OSP(0, n)`.
+def append_zeros (v : (Alloc.Vec.Vec u8 Alloc.Alloc.Global)) (n : usize) :
+    RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global) := do
+  let r : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) := v;
+  let r : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      n
+      (fun r _ => (do (pure true) : RustM Bool))
+      r
+      (fun r _i =>
+        (do
+        (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global r (0 : u8)) :
+        RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global))));
+  (pure r)
+
+--  DST_prime = DST || I2OSP(len(DST), 1) (RFC 9380, Section 5.3.1, step 3).
+-- 
+--  The length byte is `len(DST) mod 256`; it equals `len(DST)` for a DST of
+--  at most `MAX_DST_LEN` bytes.
+def build_dst_prime (dst : (RustSlice u8)) :
+    RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global) := do
+  let r : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (append (← (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk)) dst);
+  let r : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global
+      r
+      (← (Rust_primitives.Hax.cast_op
+        (← ((← (Core_models.Slice.Impl.len u8 dst)) &&&? (255 : usize))))));
+  (pure r)
+
+--  msg_prime = Z_pad || msg || I2OSP(len_in_bytes, 2) || I2OSP(0, 1) || DST_prime
+--  (RFC 9380, Section 5.3.1, steps 4 to 6), for a hash with input block
+--  length `s_in_bytes`.
+def build_msg_prime
+    (s_in_bytes : usize)
+    (msg : (RustSlice u8))
+    (len_in_bytes : usize)
+    (dst_prime : (RustSlice u8)) :
+    RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global) := do
+  let r : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (append_zeros
+      (← (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk))
+      s_in_bytes);
+  let r : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ← (append r msg);
+  let r : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global
+      r
+      (← (Rust_primitives.Hax.cast_op
+        (← ((← (len_in_bytes >>>? (8 : i32))) &&&? (255 : usize))))));
+  let r : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global
+      r
+      (← (Rust_primitives.Hax.cast_op (← (len_in_bytes &&&? (255 : usize))))));
+  let r : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global r (0 : u8));
+  (append r dst_prime)
+
+--  DST = SHA-256("H2C-OVERSIZE-DST-" || a_very_long_DST) (RFC 9380, Section 5.3.3).
+def dst_oversize_sha256 (long_dst : (RustSlice u8)) :
+    RustM (RustArray u8 32) := do
+  let input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (append
+      (← (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk))
+      (← (Rust_primitives.unsize OVERSIZE_DST_PREFIX)));
+  let input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ← (append input long_dst);
+  (Libcrux_specs_hax.Sha256.sha256
+    (← (Core_models.Ops.Deref.Deref.deref
+      (Alloc.Vec.Vec u8 Alloc.Alloc.Global) input)))
+
+--  DST = SHA-512("H2C-OVERSIZE-DST-" || a_very_long_DST) (RFC 9380, Section 5.3.3).
+def dst_oversize_sha512 (long_dst : (RustSlice u8)) :
+    RustM (RustArray u8 64) := do
+  let input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (append
+      (← (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk))
+      (← (Rust_primitives.unsize OVERSIZE_DST_PREFIX)));
+  let input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ← (append input long_dst);
+  (Libcrux_specs_hax.Sha512.sha512
+    (← (Core_models.Ops.Deref.Deref.deref
+      (Alloc.Vec.Vec u8 Alloc.Alloc.Global) input)))
+
+--  Steps 3 to 12 of `expand_message_xmd` with H = SHA-256, for arguments that
+--  pass step 2 and `ell = ceil(len_in_bytes / 32)`.
+def expand_message_xmd_sha256_steps
+    (msg : (RustSlice u8))
+    (dst : (RustSlice u8))
+    (len_in_bytes : usize)
+    (ell : usize) :
+    RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global) := do
+  let dst_prime : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ← (build_dst_prime dst);
+  let msg_prime : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (build_msg_prime
+      SHA256_S_IN_BYTES
+      msg
+      len_in_bytes
+      (← (Core_models.Ops.Deref.Deref.deref
+        (Alloc.Vec.Vec u8 Alloc.Alloc.Global) dst_prime)));
+  let b_0 : (RustArray u8 32) ←
+    (Libcrux_specs_hax.Sha256.sha256
+      (← (Core_models.Ops.Deref.Deref.deref
+        (Alloc.Vec.Vec u8 Alloc.Alloc.Global) msg_prime)));
+  let b_1_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (append
+      (← (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk))
+      (← (Rust_primitives.unsize b_0)));
+  let b_1_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global b_1_input (1 : u8));
+  let b_1_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (append
+      b_1_input
+      (← (Core_models.Ops.Deref.Deref.deref
+        (Alloc.Vec.Vec u8 Alloc.Alloc.Global) dst_prime)));
+  let b_prev : (RustArray u8 32) ←
+    (Libcrux_specs_hax.Sha256.sha256
+      (← (Core_models.Ops.Deref.Deref.deref
+        (Alloc.Vec.Vec u8 Alloc.Alloc.Global) b_1_input)));
+  let uniform_bytes : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (append
+      (← (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk))
+      (← (Rust_primitives.unsize b_prev)));
+  let ⟨b_prev, uniform_bytes⟩ ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (2 : usize)
+      (← (ell +? (1 : usize)))
+      (fun ⟨b_prev, uniform_bytes⟩ _ => (do (pure true) : RustM Bool))
+      (Rust_primitives.Hax.Tuple2.mk b_prev uniform_bytes)
+      (fun ⟨b_prev, uniform_bytes⟩ i =>
+        (do
+        let b_i_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+          (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk);
+        let b_i_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+          (Rust_primitives.Hax.Folds.fold_range
+            (0 : usize)
+            SHA256_B_IN_BYTES
+            (fun b_i_input _ => (do (pure true) : RustM Bool))
+            b_i_input
+            (fun b_i_input j =>
+              (do
+              (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global
+                b_i_input
+                (← ((← b_0[j]_?) ^^^? (← b_prev[j]_?)))) :
+              RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global))));
+        let b_i_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+          (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global
+            b_i_input
+            (← (Rust_primitives.Hax.cast_op (← (i &&&? (255 : usize))))));
+        let b_i_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+          (append
+            b_i_input
+            (← (Core_models.Ops.Deref.Deref.deref
+              (Alloc.Vec.Vec u8 Alloc.Alloc.Global) dst_prime)));
+        let b_prev : (RustArray u8 32) ←
+          (Libcrux_specs_hax.Sha256.sha256
+            (← (Core_models.Ops.Deref.Deref.deref
+              (Alloc.Vec.Vec u8 Alloc.Alloc.Global) b_i_input)));
+        let uniform_bytes : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+          (append uniform_bytes (← (Rust_primitives.unsize b_prev)));
+        (pure (Rust_primitives.Hax.Tuple2.mk b_prev uniform_bytes)) :
+        RustM
+        (Rust_primitives.Hax.Tuple2
+          (RustArray u8 32)
+          (Alloc.Vec.Vec u8 Alloc.Alloc.Global)))));
+  let out : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk);
+  let out : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      len_in_bytes
+      (fun out _ => (do (pure true) : RustM Bool))
+      out
+      (fun out i =>
+        (do
+        (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global out (← uniform_bytes[i]_?))
+        :
+        RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global))));
+  (pure out)
+
+--  `expand_message_xmd(msg, DST, len_in_bytes)` with H = SHA-256
+--  (RFC 9380, Section 5.3.1).
+-- 
+--  Returns `None` exactly when step 2 aborts: `ell > 255`, or
+--  `len_in_bytes > 65535`, or `len(DST) > 255`. This function does not apply
+--  Section 5.3.3; `expand_message_xmd_sha256_long_dst` does.
+def expand_message_xmd_sha256
+    (msg : (RustSlice u8))
+    (dst : (RustSlice u8))
+    (len_in_bytes : usize) :
+    RustM
+    (Core_models.Option.Option (Alloc.Vec.Vec u8 Alloc.Alloc.Global))
+    := do
+  if
+  (← ((← (Rust_primitives.Hax.Machine_int.gt len_in_bytes MAX_LEN_IN_BYTES))
+    ||? (← (Rust_primitives.Hax.Machine_int.gt
+      (← (Core_models.Slice.Impl.len u8 dst))
+      MAX_DST_LEN)))) then
+    (pure Core_models.Option.Option.None)
+  else
+    let ell : usize ←
+      ((← ((← (len_in_bytes +? SHA256_B_IN_BYTES)) -? (1 : usize)))
+        /? SHA256_B_IN_BYTES);
+    if (← (Rust_primitives.Hax.Machine_int.gt ell MAX_ELL)) then
+      (pure Core_models.Option.Option.None)
+    else
+      (pure (Core_models.Option.Option.Some
+        (← (expand_message_xmd_sha256_steps msg dst len_in_bytes ell))))
+
+--  `expand_message_xmd` with H = SHA-256 for a DST of any length: a DST
+--  longer than 255 bytes is replaced by `dst_oversize_sha256(DST)`
+--  (RFC 9380, Section 5.3.3), and a shorter one is used as given.
+-- 
+--  Returns `None` exactly when `ell > 255` or `len_in_bytes > 65535`.
+def expand_message_xmd_sha256_long_dst
+    (msg : (RustSlice u8))
+    (dst : (RustSlice u8))
+    (len_in_bytes : usize) :
+    RustM
+    (Core_models.Option.Option (Alloc.Vec.Vec u8 Alloc.Alloc.Global))
+    := do
+  if
+  (← (Rust_primitives.Hax.Machine_int.gt
+    (← (Core_models.Slice.Impl.len u8 dst))
+    MAX_DST_LEN)) then
+    let short_dst : (RustArray u8 32) ← (dst_oversize_sha256 dst);
+    (expand_message_xmd_sha256
+      msg
+      (← (Rust_primitives.unsize short_dst))
+      len_in_bytes)
+  else
+    (expand_message_xmd_sha256 msg dst len_in_bytes)
+
+--  Steps 3 to 12 of `expand_message_xmd` with H = SHA-512, for arguments that
+--  pass step 2 and `ell = ceil(len_in_bytes / 64)`.
+def expand_message_xmd_sha512_steps
+    (msg : (RustSlice u8))
+    (dst : (RustSlice u8))
+    (len_in_bytes : usize)
+    (ell : usize) :
+    RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global) := do
+  let dst_prime : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ← (build_dst_prime dst);
+  let msg_prime : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (build_msg_prime
+      SHA512_S_IN_BYTES
+      msg
+      len_in_bytes
+      (← (Core_models.Ops.Deref.Deref.deref
+        (Alloc.Vec.Vec u8 Alloc.Alloc.Global) dst_prime)));
+  let b_0 : (RustArray u8 64) ←
+    (Libcrux_specs_hax.Sha512.sha512
+      (← (Core_models.Ops.Deref.Deref.deref
+        (Alloc.Vec.Vec u8 Alloc.Alloc.Global) msg_prime)));
+  let b_1_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (append
+      (← (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk))
+      (← (Rust_primitives.unsize b_0)));
+  let b_1_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global b_1_input (1 : u8));
+  let b_1_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (append
+      b_1_input
+      (← (Core_models.Ops.Deref.Deref.deref
+        (Alloc.Vec.Vec u8 Alloc.Alloc.Global) dst_prime)));
+  let b_prev : (RustArray u8 64) ←
+    (Libcrux_specs_hax.Sha512.sha512
+      (← (Core_models.Ops.Deref.Deref.deref
+        (Alloc.Vec.Vec u8 Alloc.Alloc.Global) b_1_input)));
+  let uniform_bytes : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (append
+      (← (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk))
+      (← (Rust_primitives.unsize b_prev)));
+  let ⟨b_prev, uniform_bytes⟩ ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (2 : usize)
+      (← (ell +? (1 : usize)))
+      (fun ⟨b_prev, uniform_bytes⟩ _ => (do (pure true) : RustM Bool))
+      (Rust_primitives.Hax.Tuple2.mk b_prev uniform_bytes)
+      (fun ⟨b_prev, uniform_bytes⟩ i =>
+        (do
+        let b_i_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+          (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk);
+        let b_i_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+          (Rust_primitives.Hax.Folds.fold_range
+            (0 : usize)
+            SHA512_B_IN_BYTES
+            (fun b_i_input _ => (do (pure true) : RustM Bool))
+            b_i_input
+            (fun b_i_input j =>
+              (do
+              (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global
+                b_i_input
+                (← ((← b_0[j]_?) ^^^? (← b_prev[j]_?)))) :
+              RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global))));
+        let b_i_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+          (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global
+            b_i_input
+            (← (Rust_primitives.Hax.cast_op (← (i &&&? (255 : usize))))));
+        let b_i_input : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+          (append
+            b_i_input
+            (← (Core_models.Ops.Deref.Deref.deref
+              (Alloc.Vec.Vec u8 Alloc.Alloc.Global) dst_prime)));
+        let b_prev : (RustArray u8 64) ←
+          (Libcrux_specs_hax.Sha512.sha512
+            (← (Core_models.Ops.Deref.Deref.deref
+              (Alloc.Vec.Vec u8 Alloc.Alloc.Global) b_i_input)));
+        let uniform_bytes : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+          (append uniform_bytes (← (Rust_primitives.unsize b_prev)));
+        (pure (Rust_primitives.Hax.Tuple2.mk b_prev uniform_bytes)) :
+        RustM
+        (Rust_primitives.Hax.Tuple2
+          (RustArray u8 64)
+          (Alloc.Vec.Vec u8 Alloc.Alloc.Global)))));
+  let out : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Alloc.Vec.Impl.new u8 Rust_primitives.Hax.Tuple0.mk);
+  let out : (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      len_in_bytes
+      (fun out _ => (do (pure true) : RustM Bool))
+      out
+      (fun out i =>
+        (do
+        (Alloc.Vec.Impl_1.push u8 Alloc.Alloc.Global out (← uniform_bytes[i]_?))
+        :
+        RustM (Alloc.Vec.Vec u8 Alloc.Alloc.Global))));
+  (pure out)
+
+--  `expand_message_xmd(msg, DST, len_in_bytes)` with H = SHA-512
+--  (RFC 9380, Section 5.3.1).
+-- 
+--  Returns `None` exactly when step 2 aborts: `ell > 255`, or
+--  `len_in_bytes > 65535`, or `len(DST) > 255`. This function does not apply
+--  Section 5.3.3; `expand_message_xmd_sha512_long_dst` does.
+def expand_message_xmd_sha512
+    (msg : (RustSlice u8))
+    (dst : (RustSlice u8))
+    (len_in_bytes : usize) :
+    RustM
+    (Core_models.Option.Option (Alloc.Vec.Vec u8 Alloc.Alloc.Global))
+    := do
+  if
+  (← ((← (Rust_primitives.Hax.Machine_int.gt len_in_bytes MAX_LEN_IN_BYTES))
+    ||? (← (Rust_primitives.Hax.Machine_int.gt
+      (← (Core_models.Slice.Impl.len u8 dst))
+      MAX_DST_LEN)))) then
+    (pure Core_models.Option.Option.None)
+  else
+    let ell : usize ←
+      ((← ((← (len_in_bytes +? SHA512_B_IN_BYTES)) -? (1 : usize)))
+        /? SHA512_B_IN_BYTES);
+    if (← (Rust_primitives.Hax.Machine_int.gt ell MAX_ELL)) then
+      (pure Core_models.Option.Option.None)
+    else
+      (pure (Core_models.Option.Option.Some
+        (← (expand_message_xmd_sha512_steps msg dst len_in_bytes ell))))
+
+--  `expand_message_xmd` with H = SHA-512 for a DST of any length: a DST
+--  longer than 255 bytes is replaced by `dst_oversize_sha512(DST)`
+--  (RFC 9380, Section 5.3.3), and a shorter one is used as given.
+-- 
+--  Returns `None` exactly when `ell > 255` or `len_in_bytes > 65535`.
+def expand_message_xmd_sha512_long_dst
+    (msg : (RustSlice u8))
+    (dst : (RustSlice u8))
+    (len_in_bytes : usize) :
+    RustM
+    (Core_models.Option.Option (Alloc.Vec.Vec u8 Alloc.Alloc.Global))
+    := do
+  if
+  (← (Rust_primitives.Hax.Machine_int.gt
+    (← (Core_models.Slice.Impl.len u8 dst))
+    MAX_DST_LEN)) then
+    let short_dst : (RustArray u8 64) ← (dst_oversize_sha512 dst);
+    (expand_message_xmd_sha512
+      msg
+      (← (Rust_primitives.unsize short_dst))
+      len_in_bytes)
+  else
+    (expand_message_xmd_sha512 msg dst len_in_bytes)
+
+--  2^256 mod p for the P-256 prime p = 2^256 - 2^224 + 2^192 + 2^96 - 1,
+--  that is 2^224 - 2^192 - 2^96 + 1, in the big-endian limb order of
+--  `P256FieldElement`.
+def P256_TWO_256 : (RustArray u64 4) :=
+  RustM.of_isOk
+    (do
+    #v[(4294967294 : u64),
+         (18446744073709551615 : u64),
+         (18446744069414584320 : u64),
+         (1 : u64)])
+    (by rfl)
+
+--  tv = substr(uniform_bytes, L * i, L) for L = 48
+--  (RFC 9380, Section 5.2, steps 5 and 6, with m = 1 and j = 0).
+def substr_48 (uniform_bytes : (RustSlice u8)) (i : usize) :
+    RustM (RustArray u8 48) := do
+  let tv : (RustArray u8 48) ←
+    (Rust_primitives.Hax.repeat (0 : u8) (48 : usize));
+  let tv : (RustArray u8 48) ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      L_48
+      (fun tv _ => (do (pure true) : RustM Bool))
+      tv
+      (fun tv j =>
+        (do
+        (Rust_primitives.Hax.Monomorphized_update_at.update_at_usize
+          tv
+          j
+          (← uniform_bytes[(← ((← (L_48 *? i)) +? j))]_?)) :
+        RustM (RustArray u8 48))));
+  (pure tv)
+
+end Libcrux_specs_hax.Hash_to_field
+
+
+namespace Libcrux_specs_hax.Hash_to_curve25519
+
+--  J = 486662, the coefficient of the Montgomery curve
+--  curve25519: K * t^2 = s^3 + J * s^2 + s with K = 1
+--  (RFC 9380, Section 8.5; RFC 7748, Section 4.1).
+def mont_j (_ : Rust_primitives.Hax.Tuple0) : RustM (RustArray u64 5) := do
+  (pure #v[(486662 : u64), (0 : u64), (0 : u64), (0 : u64), (0 : u64)])
+
+--  A point of curve25519, v^2 = u^3 + 486662 * u^2 + u, in affine
+--  coordinates.
+-- 
+--  `infinity` is 1 for the point at infinity, which is then stored with
+--  u = v = 0, and 0 for the affine point (u, v). `u` and `v` are canonical
+--  field elements in every value returned by this module.
+structure MontPoint where
+  u : (RustArray u64 5)
+  v : (RustArray u64 5)
+  infinity : u64
+
+@[instance] opaque Impl.AssociatedTypes :
+  Core_models.Clone.Clone.AssociatedTypes MontPoint :=
+  by constructor <;> exact Inhabited.default
+
+@[instance] opaque Impl :
+  Core_models.Clone.Clone MontPoint :=
+  by constructor <;> exact Inhabited.default
+
+@[instance] opaque Impl_1.AssociatedTypes :
+  Core_models.Marker.Copy.AssociatedTypes MontPoint :=
+  by constructor <;> exact Inhabited.default
+
+@[instance] opaque Impl_1 :
+  Core_models.Marker.Copy MontPoint :=
+  by constructor <;> exact Inhabited.default
+
+@[instance] opaque Impl_2.AssociatedTypes :
+  Core_models.Fmt.Debug.AssociatedTypes MontPoint :=
+  by constructor <;> exact Inhabited.default
+
+@[instance] opaque Impl_2 :
+  Core_models.Fmt.Debug MontPoint :=
+  by constructor <;> exact Inhabited.default
+
+end Libcrux_specs_hax.Hash_to_curve25519
+
+
+namespace Libcrux_specs_hax.Hash_to_curve_p256
+
+--  The field element 0.
+def H2C_P256_ZERO : (RustArray u64 4) :=
+  RustM.of_isOk (do #v[(0 : u64), (0 : u64), (0 : u64), (0 : u64)]) (by rfl)
+
+--  The field element 1.
+def H2C_P256_ONE : (RustArray u64 4) :=
+  RustM.of_isOk (do #v[(0 : u64), (0 : u64), (0 : u64), (1 : u64)]) (by rfl)
+
+--  A = -3 = p - 3, the coefficient of x of the P-256 curve
+--  (RFC 9380, Section 8.2).
+-- 
+--  A = 0xffffffff00000001000000000000000000000000fffffffffffffffffffffffc
+def H2C_P256_A : (RustArray u64 4) :=
+  RustM.of_isOk
+    (do
+    #v[(18446744069414584321 : u64),
+         (0 : u64),
+         (4294967295 : u64),
+         (18446744073709551612 : u64)])
+    (by rfl)
+
+--  Z = -10 = p - 10, the constant of the Simplified SWU method for P-256
+--  (RFC 9380, Section 8.2). Z is not a square in GF(p), Z is not -1, and
+--  g(B / (Z * A)) is a square for g(x) = x^3 + A * x + B
+--  (RFC 9380, Appendix H.2, criteria 1, 2 and 4).
+-- 
+--  Z = 0xffffffff00000001000000000000000000000000fffffffffffffffffffffff5
+def H2C_P256_Z : (RustArray u64 4) :=
+  RustM.of_isOk
+    (do
+    #v[(18446744069414584321 : u64),
+         (0 : u64),
+         (4294967295 : u64),
+         (18446744073709551605 : u64)])
+    (by rfl)
+
+--  c1 = (q - 3) / 4, an integer (RFC 9380, Appendix F.2.1.2, constant 1),
+--  for q = p. p = 3 mod 4, and 4 * c1 + 3 = p.
+-- 
+--  c1 = 0x3fffffffc00000004000000000000000000000003fffffffffffffffffffffff
+-- 
+--  The limbs are those of the integer in big-endian order; c1 is an exponent
+--  and not a field element.
+def H2C_P256_C1 : (RustArray u64 4) :=
+  RustM.of_isOk
+    (do
+    #v[(4611686017353646080 : u64),
+         (4611686018427387904 : u64),
+         (1073741823 : u64),
+         (18446744073709551615 : u64)])
+    (by rfl)
+
+--  c2 = sqrt(-Z) = sqrt(10) (RFC 9380, Appendix F.2.1.2, constant 2): the
+--  square root with sgn0(c2) = 0.
+-- 
+--  c2 = 0x25ac71c31e27646736870398ae7f554d8472e008b3aa2a49d332cbd81bcc3b80
+-- 
+--  Both square roots of -Z give the same `map_to_curve_simple_swu`: c2 enters
+--  only the sign of y, which step 24 of Appendix F.2 sets from sgn0(u).
+def H2C_P256_C2 : (RustArray u64 4) :=
+  RustM.of_isOk
+    (do
+    #v[(2714669758236025959 : u64),
+         (3929113154201539917 : u64),
+         (9543936888330136137 : u64),
+         (15218450219878071168 : u64)])
+    (by rfl)
+
+--  1 if the canonical field elements `a` and `b` are equal, 0 otherwise.
+def h2c_p256_ct_eq (a : (RustArray u64 4)) (b : (RustArray u64 4)) :
+    RustM u64 := do
+  let acc : u64 := (0 : u64);
+  let acc : u64 ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      (4 : usize)
+      (fun acc _ => (do (pure true) : RustM Bool))
+      acc
+      (fun acc i =>
+        (do
+        (Rust_primitives.Hax.Machine_int.bitor
+          acc
+          (← ((← a[i]_?) ^^^? (← b[i]_?)))) :
+        RustM u64)));
+  ((1 : u64)
+    -? (← ((← (Rust_primitives.Hax.Machine_int.bitor
+        acc
+        (← (Core_models.Num.Impl_9.wrapping_neg acc))))
+      >>>? (63 : i32))))
+
+--  1 if the canonical field element `a` is zero, 0 otherwise.
+def h2c_p256_is_zero (a : (RustArray u64 4)) : RustM u64 := do
+  (h2c_p256_ct_eq a H2C_P256_ZERO)
+
+--  `then_v` if `cond` is 1, `else_v` if `cond` is 0, by a mask.
+--  CMOV(a, b, c) of RFC 9380, Section 4 is `h2c_p256_select(c, b, a)`.
+def h2c_p256_select
+    (cond : u64)
+    (then_v : (RustArray u64 4))
+    (else_v : (RustArray u64 4)) :
+    RustM (RustArray u64 4) := do
+  let mask : u64 ← (Core_models.Num.Impl_9.wrapping_neg cond);
+  let r : (RustArray u64 4) ←
+    (Rust_primitives.Hax.repeat (0 : u64) (4 : usize));
+  let r : (RustArray u64 4) ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      (4 : usize)
+      (fun r _ => (do (pure true) : RustM Bool))
+      r
+      (fun r i =>
+        (do
+        (Rust_primitives.Hax.Monomorphized_update_at.update_at_usize
+          r
+          i
+          (← (Rust_primitives.Hax.Machine_int.bitor
+            (← ((← then_v[i]_?) &&&? mask))
+            (← ((← else_v[i]_?)
+              &&&? (← (Rust_primitives.Hax.Machine_int.not mask))))))) :
+        RustM (RustArray u64 4))));
+  (pure r)
+
+--  sgn0(x) for m = 1 (RFC 9380, Section 4.1): x mod 2, where x is the least
+--  nonnegative integer representing the field element. `x` is canonical, so
+--  this is the lowest bit of the least significant limb.
+def h2c_p256_sgn0 (x : (RustArray u64 4)) : RustM u64 := do
+  ((← x[(3 : usize)]_?) &&&? (1 : u64))
+
+end Libcrux_specs_hax.Hash_to_curve_p256
 
 
 namespace Libcrux_specs_hax.Chacha20
@@ -3580,16 +4259,15 @@ structure U256 where
 
 --  The prime modulus p = 2^130 - 5.
 --  We store this symbolically and reduce using the identity: 2^130 = 5 (mod p).
-def P_LO : u128 :=
-  RustM.of_isOk (do (Core_models.Num.Impl_10.MAX -? (4 : u128))) (by rfl)
+def P_LO : u128 := (340282366920938463463374607431768211451 : u128)
 
 def P_HI : u8 := (3 : u8)
 
 --  Clamp the r value per RFC 8439, Section 2.5.
 -- 
 --  Certain bits of r must be cleared to ensure the key is in the correct form:
---  - Clear top 4 bits of bytes 3, 7, 11, 15 (i.e., r[3], r[7], r[11], r[15] &= 0x0f)
---  - Clear bottom 2 bits of bytes 4, 8, 12 (i.e., r[4], r[8], r[12] &= 0xfc)
+--  - Clear top 4 bits of bytes 3, 7, 11, 15 (i.e., `r[3], r[7], r[11], r[15] &= 0x0f`)
+--  - Clear bottom 2 bits of bytes 4, 8, 12 (i.e., `r[4], r[8], r[12] &= 0xfc`)
 def poly1305_clamp (r : (RustArray u8 16)) : RustM (RustArray u8 16) := do
   let clamped : (RustArray u8 16) := r;
   let clamped : (RustArray u8 16) ←
@@ -3708,7 +4386,7 @@ def u130_add (a : U130) (b : U130) : RustM U130 := do
     (Core_models.Num.Impl_10.overflowing_add (U130.lo a) (U130.lo b));
   let hi : u8 ←
     ((← ((U130.hi a) +? (U130.hi b)))
-      +? (← (Rust_primitives.Hax.cast_op carry)));
+      +? (← if carry then (pure (1 : u8)) else (pure (0 : u8))));
   (pure (U130.mk (lo := lo) (hi := hi)))
 
 --  Multiply two u128 values, returning a U256 (256-bit result).
@@ -3744,7 +4422,7 @@ def u128_mul (a : u128) (b : u128) : RustM U256 := do
     (Core_models.Num.Impl_10.wrapping_add
       (← (Core_models.Num.Impl_10.wrapping_add
         (← (Core_models.Num.Impl_10.wrapping_add hh mid_hi))
-        (← (Rust_primitives.Hax.cast_op carry1))))
+        (← if carry1 then (pure (1 : u128)) else (pure (0 : u128)))))
       (← if mid_carry then
         ((1 : u128) <<<? (64 : i32))
       else
@@ -3776,14 +4454,16 @@ def u130_mul_mod (acc : U130) (r : u128) : RustM U130 := do
       (← if carry then ((5 : u128) <<<? (126 : i32)) else (pure (0 : u128))));
   let ⟨sum_lo, c⟩ ←
     (Core_models.Num.Impl_10.overflowing_add base_lo high_times_5);
-  let sum_hi : u8 ← (base_hi +? (← (Rust_primitives.Hax.cast_op c)));
+  let sum_hi : u8 ←
+    (base_hi +? (← if c then (pure (1 : u8)) else (pure (0 : u8))));
   let extra : u8 ← (sum_hi >>>? (2 : i32));
   let final_hi : u8 ← (sum_hi &&&? (3 : u8));
   let ⟨final_lo, c2⟩ ←
     (Core_models.Num.Impl_10.overflowing_add
       sum_lo
       (← ((← (Rust_primitives.Hax.cast_op extra)) *? (5 : u128))));
-  let final_hi2 : u8 ← (final_hi +? (← (Rust_primitives.Hax.cast_op c2)));
+  let final_hi2 : u8 ←
+    (final_hi +? (← if c2 then (pure (1 : u8)) else (pure (0 : u8))));
   (pure (U130.mk (lo := final_lo) (hi := final_hi2)))
 
 --  Final reduction: ensure value is in [0, 2^130-5).
@@ -3793,7 +4473,8 @@ def u130_mul_mod (acc : U130) (r : u128) : RustM U130 := do
 def final_reduce (acc : U130) : RustM u128 := do
   let ⟨test_lo, c⟩ ←
     (Core_models.Num.Impl_10.overflowing_add (U130.lo acc) (5 : u128));
-  let test_hi : u8 ← ((U130.hi acc) +? (← (Rust_primitives.Hax.cast_op c)));
+  let test_hi : u8 ←
+    ((U130.hi acc) +? (← if c then (pure (1 : u8)) else (pure (0 : u8))));
   if (← (Rust_primitives.Hax.Machine_int.ge test_hi (4 : u8))) then
     (pure test_lo)
   else
@@ -5932,12 +6613,15 @@ def build_ghash_input (aad : (RustSlice u8)) (ciphertext : (RustSlice u8)) :
           usize
           (Alloc.Vec.Vec u8 Alloc.Alloc.Global)))));
   let aad_bits : u64 ←
-    ((← (Rust_primitives.Hax.cast_op (← (Core_models.Slice.Impl.len u8 aad))))
-      *? (8 : u64));
+    (Rust_primitives.Hax.cast_op
+      (← ((← (Rust_primitives.Hax.cast_op
+          (← (Core_models.Slice.Impl.len u8 aad))))
+        *? (8 : u128))));
   let ct_bits : u64 ←
-    ((← (Rust_primitives.Hax.cast_op
-        (← (Core_models.Slice.Impl.len u8 ciphertext))))
-      *? (8 : u64));
+    (Rust_primitives.Hax.cast_op
+      (← ((← (Rust_primitives.Hax.cast_op
+          (← (Core_models.Slice.Impl.len u8 ciphertext))))
+        *? (8 : u128))));
   let aad_len_bytes : (RustArray u8 8) ←
     (Core_models.Num.Impl_9.to_be_bytes aad_bits);
   let ct_len_bytes : (RustArray u8 8) ←
@@ -5990,31 +6674,32 @@ def build_ghash_input (aad : (RustSlice u8)) (ciphertext : (RustSlice u8)) :
           (Alloc.Vec.Vec u8 Alloc.Alloc.Global)))));
   (pure input)
 
---  Generic AES-GCM encryption using a caller-provided block cipher.
+--  One AES block encryption under the selected key: AES-256 with `k32` when
+--  `key256` holds, AES-128 with `k16` otherwise.
+def gcm_block
+    (key256 : Bool)
+    (k16 : (RustArray u8 16))
+    (k32 : (RustArray u8 32))
+    (block : (RustArray u8 16)) :
+    RustM (RustArray u8 16) := do
+  if key256 then
+    (Libcrux_specs_hax.Aes.aes256_encrypt k32 block)
+  else
+    (Libcrux_specs_hax.Aes.aes128_encrypt k16 block)
+
+--  AES-GCM encryption for either key size.
 -- 
---  key_encrypt: function that encrypts a single 16-byte block under the key.
+--  key256 selects AES-256 with key k32; otherwise AES-128 with key k16. The
+--  key that is not selected is ignored.
 --  nonce: 12-byte nonce (IV).
 --  aad: additional authenticated data (not encrypted, but authenticated).
 --  plaintext: data to encrypt and authenticate.
 -- 
 --  Returns (ciphertext, tag).
 def aes_gcm_encrypt_generic
-    (impl_Fn([u8;_16])_-__[u8;_16] : Type)
-    [trait_constr_aes_gcm_encrypt_generic_associated_type_i0 :
-      Core_models.Ops.Function.Fn.AssociatedTypes
-      impl_Fn([u8;_16])_-__[u8;_16]
-      (Rust_primitives.Hax.Tuple1 (RustArray u8 16))]
-    [trait_constr_aes_gcm_encrypt_generic_i0 : Core_models.Ops.Function.Fn
-      impl_Fn([u8;_16])_-__[u8;_16]
-      (Rust_primitives.Hax.Tuple1 (RustArray u8 16))
-      (associatedTypes := {
-        show
-          Core_models.Ops.Function.Fn.AssociatedTypes
-          impl_Fn([u8;_16])_-__[u8;_16]
-          (Rust_primitives.Hax.Tuple1 (RustArray u8 16))
-        by infer_instance
-        with sorry})]
-    (key_encrypt : impl_Fn([u8;_16])_-__[u8;_16])
+    (key256 : Bool)
+    (k16 : (RustArray u8 16))
+    (k32 : (RustArray u8 32))
     (nonce : (RustArray u8 12))
     (aad : (RustSlice u8))
     (plaintext : (RustSlice u8)) :
@@ -6024,12 +6709,11 @@ def aes_gcm_encrypt_generic
       (RustArray u8 16))
     := do
   let h_bytes : (RustArray u8 16) ←
-    (Core_models.Ops.Function.Fn.call
-      impl_Fn([u8;_16])_-__[u8;_16]
-      (Rust_primitives.Hax.Tuple1 (RustArray u8 16))
-      key_encrypt
-      (Rust_primitives.Hax.Tuple1.mk
-        (← (Rust_primitives.Hax.repeat (0 : u8) (16 : usize)))));
+    (gcm_block
+      key256
+      k16
+      k32
+      (← (Rust_primitives.Hax.repeat (0 : u8) (16 : usize))));
   let h : u128 ←
     (Libcrux_specs_hax.Gf128.bytes_to_u128
       (← (Rust_primitives.unsize h_bytes)));
@@ -6096,12 +6780,7 @@ def aes_gcm_encrypt_generic
       (fun ⟨ciphertext, counter, i⟩ =>
         (do
         let counter : (RustArray u8 16) ← (inc32 counter);
-        let keystream : (RustArray u8 16) ←
-          (Core_models.Ops.Function.Fn.call
-            impl_Fn([u8;_16])_-__[u8;_16]
-            (Rust_primitives.Hax.Tuple1 (RustArray u8 16))
-            key_encrypt
-            (Rust_primitives.Hax.Tuple1.mk counter));
+        let keystream : (RustArray u8 16) ← (gcm_block key256 k16 k32 counter);
         let block_start : usize ← (i *? (16 : usize));
         let block_end : usize ←
           if
@@ -6163,12 +6842,7 @@ def aes_gcm_encrypt_generic
       h
       (← (Core_models.Ops.Deref.Deref.deref
         (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ghash_input)));
-  let encrypted_j0 : (RustArray u8 16) ←
-    (Core_models.Ops.Function.Fn.call
-      impl_Fn([u8;_16])_-__[u8;_16]
-      (Rust_primitives.Hax.Tuple1 (RustArray u8 16))
-      key_encrypt
-      (Rust_primitives.Hax.Tuple1.mk j0));
+  let encrypted_j0 : (RustArray u8 16) ← (gcm_block key256 k16 k32 j0);
   let encrypted_j0_val : u128 ←
     (Libcrux_specs_hax.Gf128.bytes_to_u128
       (← (Rust_primitives.unsize encrypted_j0)));
@@ -6176,26 +6850,13 @@ def aes_gcm_encrypt_generic
   let tag : (RustArray u8 16) ← (Libcrux_specs_hax.Gf128.u128_to_bytes tag_val);
   (pure (Rust_primitives.Hax.Tuple2.mk ciphertext tag))
 
---  Generic AES-GCM decryption using a caller-provided block cipher.
+--  AES-GCM decryption for either key size.
 -- 
 --  Returns Some(plaintext) if the tag is valid, None otherwise.
 def aes_gcm_decrypt_generic
-    (impl_Fn([u8;_16])_-__[u8;_16] : Type)
-    [trait_constr_aes_gcm_decrypt_generic_associated_type_i0 :
-      Core_models.Ops.Function.Fn.AssociatedTypes
-      impl_Fn([u8;_16])_-__[u8;_16]
-      (Rust_primitives.Hax.Tuple1 (RustArray u8 16))]
-    [trait_constr_aes_gcm_decrypt_generic_i0 : Core_models.Ops.Function.Fn
-      impl_Fn([u8;_16])_-__[u8;_16]
-      (Rust_primitives.Hax.Tuple1 (RustArray u8 16))
-      (associatedTypes := {
-        show
-          Core_models.Ops.Function.Fn.AssociatedTypes
-          impl_Fn([u8;_16])_-__[u8;_16]
-          (Rust_primitives.Hax.Tuple1 (RustArray u8 16))
-        by infer_instance
-        with sorry})]
-    (key_encrypt : impl_Fn([u8;_16])_-__[u8;_16])
+    (key256 : Bool)
+    (k16 : (RustArray u8 16))
+    (k32 : (RustArray u8 32))
     (nonce : (RustArray u8 12))
     (aad : (RustSlice u8))
     (ciphertext : (RustSlice u8))
@@ -6204,12 +6865,11 @@ def aes_gcm_decrypt_generic
     (Core_models.Option.Option (Alloc.Vec.Vec u8 Alloc.Alloc.Global))
     := do
   let h_bytes : (RustArray u8 16) ←
-    (Core_models.Ops.Function.Fn.call
-      impl_Fn([u8;_16])_-__[u8;_16]
-      (Rust_primitives.Hax.Tuple1 (RustArray u8 16))
-      key_encrypt
-      (Rust_primitives.Hax.Tuple1.mk
-        (← (Rust_primitives.Hax.repeat (0 : u8) (16 : usize)))));
+    (gcm_block
+      key256
+      k16
+      k32
+      (← (Rust_primitives.Hax.repeat (0 : u8) (16 : usize))));
   let h : u128 ←
     (Libcrux_specs_hax.Gf128.bytes_to_u128
       (← (Rust_primitives.unsize h_bytes)));
@@ -6263,12 +6923,7 @@ def aes_gcm_decrypt_generic
       h
       (← (Core_models.Ops.Deref.Deref.deref
         (Alloc.Vec.Vec u8 Alloc.Alloc.Global) ghash_input)));
-  let encrypted_j0 : (RustArray u8 16) ←
-    (Core_models.Ops.Function.Fn.call
-      impl_Fn([u8;_16])_-__[u8;_16]
-      (Rust_primitives.Hax.Tuple1 (RustArray u8 16))
-      key_encrypt
-      (Rust_primitives.Hax.Tuple1.mk j0));
+  let encrypted_j0 : (RustArray u8 16) ← (gcm_block key256 k16 k32 j0);
   let encrypted_j0_val : u128 ←
     (Libcrux_specs_hax.Gf128.bytes_to_u128
       (← (Rust_primitives.unsize encrypted_j0)));
@@ -6325,11 +6980,7 @@ def aes_gcm_decrypt_generic
           (do
           let counter : (RustArray u8 16) ← (inc32 counter);
           let keystream : (RustArray u8 16) ←
-            (Core_models.Ops.Function.Fn.call
-              impl_Fn([u8;_16])_-__[u8;_16]
-              (Rust_primitives.Hax.Tuple1 (RustArray u8 16))
-              key_encrypt
-              (Rust_primitives.Hax.Tuple1.mk counter));
+            (gcm_block key256 k16 k32 counter);
           let block_start : usize ← (i *? (16 : usize));
           let block_end : usize ←
             if
@@ -6396,11 +7047,10 @@ def aes128_gcm_encrypt
       (Alloc.Vec.Vec u8 Alloc.Alloc.Global)
       (RustArray u8 16))
     := do
-  let k : (RustArray u8 16) := key;
-  (aes_gcm_encrypt_generic ((RustArray u8 16) -> RustM (RustArray u8 16))
-    (fun block =>
-      (do
-      (Libcrux_specs_hax.Aes.aes128_encrypt k block) : RustM (RustArray u8 16)))
+  (aes_gcm_encrypt_generic
+    false
+    key
+    (← (Rust_primitives.Hax.repeat (0 : u8) (32 : usize)))
     nonce
     aad
     plaintext)
@@ -6417,11 +7067,10 @@ def aes128_gcm_decrypt
     RustM
     (Core_models.Option.Option (Alloc.Vec.Vec u8 Alloc.Alloc.Global))
     := do
-  let k : (RustArray u8 16) := key;
-  (aes_gcm_decrypt_generic ((RustArray u8 16) -> RustM (RustArray u8 16))
-    (fun block =>
-      (do
-      (Libcrux_specs_hax.Aes.aes128_encrypt k block) : RustM (RustArray u8 16)))
+  (aes_gcm_decrypt_generic
+    false
+    key
+    (← (Rust_primitives.Hax.repeat (0 : u8) (32 : usize)))
     nonce
     aad
     ciphertext
@@ -6440,11 +7089,10 @@ def aes256_gcm_encrypt
       (Alloc.Vec.Vec u8 Alloc.Alloc.Global)
       (RustArray u8 16))
     := do
-  let k : (RustArray u8 32) := key;
-  (aes_gcm_encrypt_generic ((RustArray u8 16) -> RustM (RustArray u8 16))
-    (fun block =>
-      (do
-      (Libcrux_specs_hax.Aes.aes256_encrypt k block) : RustM (RustArray u8 16)))
+  (aes_gcm_encrypt_generic
+    true
+    (← (Rust_primitives.Hax.repeat (0 : u8) (16 : usize)))
+    key
     nonce
     aad
     plaintext)
@@ -6461,11 +7109,10 @@ def aes256_gcm_decrypt
     RustM
     (Core_models.Option.Option (Alloc.Vec.Vec u8 Alloc.Alloc.Global))
     := do
-  let k : (RustArray u8 32) := key;
-  (aes_gcm_decrypt_generic ((RustArray u8 16) -> RustM (RustArray u8 16))
-    (fun block =>
-      (do
-      (Libcrux_specs_hax.Aes.aes256_encrypt k block) : RustM (RustArray u8 16)))
+  (aes_gcm_decrypt_generic
+    true
+    (← (Rust_primitives.Hax.repeat (0 : u8) (16 : usize)))
+    key
     nonce
     aad
     ciphertext
@@ -6493,7 +7140,11 @@ def fe_one (_ : Rust_primitives.Hax.Tuple0) : RustM (RustArray u64 5) := do
   (pure #v[(1 : u64), (0 : u64), (0 : u64), (0 : u64), (0 : u64)])
 
 --  Propagate carries across limbs, reducing mod p = 2^255 - 19.
---  After this, each limb is at most 51 bits.
+-- 
+--  For limbs below 2^63 the result has limbs 0, 2, 3, 4 below 2^51 and limb 1
+--  at most 2^51: the carry out of limb 4 is folded into limb 0 and its carry
+--  into limb 1, which is not masked again. A second `fe_carry` brings every
+--  limb below 2^51.
 def fe_carry (a : (RustArray u64 5)) : RustM (RustArray u64 5) := do
   let r : (RustArray u64 5) := a;
   let carry : u64 ← ((← r[(0 : usize)]_?) >>>? (51 : i32));
@@ -6580,6 +7231,9 @@ def fe_add (a : (RustArray u64 5)) (b : (RustArray u64 5)) :
 --  2*p = 2*(2^255 - 19) in 51-bit limbs =
 --    [2*(2^51-19), 2*(2^51-1), 2*(2^51-1), 2*(2^51-1), 2*(2^51-1)]
 --  = [2^52 - 38,   2^52 - 2,   2^52 - 2,   2^52 - 2,   2^52 - 2]
+-- 
+--  The limbs of `b` must not exceed the bias: limbs below 2^51 + 2^9, the range
+--  of `fe_mul` and `fe_carry`, are within it. The limbs of `a` are below 2^62.
 def fe_sub (a : (RustArray u64 5)) (b : (RustArray u64 5)) :
     RustM (RustArray u64 5) := do
   (fe_carry
@@ -6598,6 +7252,9 @@ def fe_sub (a : (RustArray u64 5)) (b : (RustArray u64 5)) :
 -- 
 --  Reduction uses 2^255 = 19 (mod p): when a product lands in limb >= 5,
 --  it wraps to limb (i-5) with a factor of 19.
+-- 
+--  For limbs below 2^52 the result has limbs 0, 2, 3, 4 below 2^51 and limb 1
+--  below 2^51 + 2^9.
 def fe_mul (a : (RustArray u64 5)) (b : (RustArray u64 5)) :
     RustM (RustArray u64 5) := do
   let b1_19 : u128 ←
@@ -6825,6 +7482,34 @@ def fe_reduce (a : (RustArray u64 5)) : RustM (RustArray u64 5) := do
                (← ((← r[(4 : usize)]_?)
                  &&&? (← (Rust_primitives.Hax.Machine_int.not mask))))))])
 
+end Libcrux_specs_hax.Curve25519
+
+
+namespace Libcrux_specs_hax.Hash_to_curve25519
+
+--  The affine curve25519 point (xn / xd, yn / yd), for nonzero `xd` and `yd`.
+def mont_point_from_fractions
+    (xn : (RustArray u64 5))
+    (xd : (RustArray u64 5))
+    (yn : (RustArray u64 5))
+    (yd : (RustArray u64 5)) :
+    RustM MontPoint := do
+  (pure (MontPoint.mk
+    (u := (← (Libcrux_specs_hax.Curve25519.fe_reduce
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        xn
+        (← (Libcrux_specs_hax.Curve25519.fe_inv xd)))))))
+    (v := (← (Libcrux_specs_hax.Curve25519.fe_reduce
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        yn
+        (← (Libcrux_specs_hax.Curve25519.fe_inv yd)))))))
+    (infinity := (0 : u64))))
+
+end Libcrux_specs_hax.Hash_to_curve25519
+
+
+namespace Libcrux_specs_hax.Curve25519
+
 --  Deserialise 32 bytes (little-endian) into a field element.
 --  Clears bit 255 per RFC 7748.
 def fe_from_bytes (b : (RustArray u8 32)) : RustM (RustArray u64 5) := do
@@ -6932,6 +7617,204 @@ def fe_from_bytes (b : (RustArray u8 32)) : RustM (RustArray u64 5) := do
                      (24 : usize))))
                  >>>? (12 : i32)))
                &&&? MASK51))])
+
+end Libcrux_specs_hax.Curve25519
+
+
+namespace Libcrux_specs_hax.Hash_to_field
+
+--  OS2IP(tv) mod (2^255 - 19) for a 48-byte big-endian string `tv`
+--  (RFC 9380, Section 5.2, step 7), as a canonical radix-2^51 field element.
+-- 
+--  With `hi = OS2IP(tv[0..24])` and `lo = OS2IP(tv[24..48])`, both below
+--  2^192, the value is `hi * 2^192 + lo`; 2^192 = 2^39 * 2^153 is the field
+--  element with limb 3 equal to 2^39.
+def fe25519_from_be48 (tv : (RustArray u8 48)) : RustM (RustArray u64 5) := do
+  let hi_le : (RustArray u8 32) ←
+    (Rust_primitives.Hax.repeat (0 : u8) (32 : usize));
+  let lo_le : (RustArray u8 32) ←
+    (Rust_primitives.Hax.repeat (0 : u8) (32 : usize));
+  let ⟨hi_le, lo_le⟩ ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      (24 : usize)
+      (fun ⟨hi_le, lo_le⟩ _ => (do (pure true) : RustM Bool))
+      (Rust_primitives.Hax.Tuple2.mk hi_le lo_le)
+      (fun ⟨hi_le, lo_le⟩ i =>
+        (do
+        let hi_le : (RustArray u8 32) ←
+          (Rust_primitives.Hax.Monomorphized_update_at.update_at_usize
+            hi_le
+            i
+            (← tv[(← ((23 : usize) -? i))]_?));
+        let lo_le : (RustArray u8 32) ←
+          (Rust_primitives.Hax.Monomorphized_update_at.update_at_usize
+            lo_le
+            i
+            (← tv[(← ((47 : usize) -? i))]_?));
+        (pure (Rust_primitives.Hax.Tuple2.mk hi_le lo_le)) :
+        RustM
+        (Rust_primitives.Hax.Tuple2 (RustArray u8 32) (RustArray u8 32)))));
+  let hi : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_from_bytes hi_le);
+  let lo : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_from_bytes lo_le);
+  let two_192 : (RustArray u64 5) :=
+    #v[(0 : u64),
+         (0 : u64),
+         (0 : u64),
+         (← ((1 : u64) <<<? (39 : i32))),
+         (0 : u64)];
+  (Libcrux_specs_hax.Curve25519.fe_reduce
+    (← (Libcrux_specs_hax.Curve25519.fe_add
+      (← (Libcrux_specs_hax.Curve25519.fe_mul hi two_192))
+      lo)))
+
+--  `hash_to_field(msg, count)` of RFC 9380, Section 5.2, with
+--  F = GF(2^255 - 19), m = 1, L = 48 and
+--  expand_message = `expand_message_xmd_sha512`: the parameters of the
+--  curve25519 and edwards25519 suites (Section 8.5). Each output is a
+--  canonical radix-2^51 field element of `crate::curve25519`.
+-- 
+--  Returns `None` exactly when `expand_message_xmd_sha512(msg, DST, count * 48)`
+--  aborts, that is when `count > 340` or `len(DST) > 255`.
+def hash_to_field_25519_sha512
+    (msg : (RustSlice u8))
+    (dst : (RustSlice u8))
+    (count : usize) :
+    RustM
+    (Core_models.Option.Option
+      (Alloc.Vec.Vec (RustArray u64 5) Alloc.Alloc.Global))
+    := do
+  if
+  (← (Rust_primitives.Hax.Machine_int.gt count (← (MAX_LEN_IN_BYTES /? L_48))))
+  then
+    (pure Core_models.Option.Option.None)
+  else
+    let len_in_bytes : usize ← (count *? L_48);
+    match (← (expand_message_xmd_sha512 msg dst len_in_bytes)) with
+      | (Core_models.Option.Option.None ) =>
+        (pure Core_models.Option.Option.None)
+      | (Core_models.Option.Option.Some  uniform_bytes) =>
+        let u : (Alloc.Vec.Vec (RustArray u64 5) Alloc.Alloc.Global) ←
+          (Alloc.Vec.Impl.new (RustArray u64 5) Rust_primitives.Hax.Tuple0.mk);
+        let u : (Alloc.Vec.Vec (RustArray u64 5) Alloc.Alloc.Global) ←
+          (Rust_primitives.Hax.Folds.fold_range
+            (0 : usize)
+            count
+            (fun u _ => (do (pure true) : RustM Bool))
+            u
+            (fun u i =>
+              (do
+              let tv : (RustArray u8 48) ←
+                (substr_48
+                  (← (Core_models.Ops.Deref.Deref.deref
+                    (Alloc.Vec.Vec u8 Alloc.Alloc.Global) uniform_bytes))
+                  i);
+              let u : (Alloc.Vec.Vec (RustArray u64 5) Alloc.Alloc.Global) ←
+                (Alloc.Vec.Impl_1.push (RustArray u64 5) Alloc.Alloc.Global
+                  u
+                  (← (fe25519_from_be48 tv)));
+              (pure u) :
+              RustM (Alloc.Vec.Vec (RustArray u64 5) Alloc.Alloc.Global))));
+        (pure (Core_models.Option.Option.Some u))
+
+end Libcrux_specs_hax.Hash_to_field
+
+
+namespace Libcrux_specs_hax.Hash_to_curve25519
+
+--  c2 = 2^c1 with c1 = (q + 3) / 8 = 2^252 - 2 (RFC 9380, Appendix G.2.1,
+--  constants 1 and 2).
+-- 
+--  c2 = 0x2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b1
+--     = 1 + SQRT_M1, and c2^2 = 2 * SQRT_M1.
+def elligator2_c2 (_ : Rust_primitives.Hax.Tuple0) :
+    RustM (RustArray u64 5) := do
+  let bytes : (RustArray u8 32) :=
+    #v[(177 : u8),
+         (160 : u8),
+         (14 : u8),
+         (74 : u8),
+         (39 : u8),
+         (27 : u8),
+         (238 : u8),
+         (196 : u8),
+         (120 : u8),
+         (228 : u8),
+         (47 : u8),
+         (173 : u8),
+         (6 : u8),
+         (24 : u8),
+         (67 : u8),
+         (47 : u8),
+         (167 : u8),
+         (215 : u8),
+         (251 : u8),
+         (61 : u8),
+         (153 : u8),
+         (0 : u8),
+         (77 : u8),
+         (43 : u8),
+         (11 : u8),
+         (223 : u8),
+         (193 : u8),
+         (79 : u8),
+         (128 : u8),
+         (36 : u8),
+         (131 : u8),
+         (43 : u8)];
+  (Libcrux_specs_hax.Curve25519.fe_from_bytes bytes)
+
+--  c1 = sqrt(-486664) with sgn0(c1) = 0 (RFC 9380, Appendix G.2.2).
+-- 
+--  c1 = 6853475219497561581579357271197624642482790079785650197046958215289687604742
+--     = 0x0f26edf460a006bbd27b08dc03fc4f7ec5a1d3d14b7d1a82cc6e04aaff457e06
+-- 
+--  With this sign, `mont_from_edwards` sends the edwards25519 base point to
+--  the curve25519 base point (9, v) with
+--  v = 43114425171068552920764898935933967039370386198203806730763910166200978582548.
+def sqrt_neg_486664 (_ : Rust_primitives.Hax.Tuple0) :
+    RustM (RustArray u64 5) := do
+  let bytes : (RustArray u8 32) :=
+    #v[(6 : u8),
+         (126 : u8),
+         (69 : u8),
+         (255 : u8),
+         (170 : u8),
+         (4 : u8),
+         (110 : u8),
+         (204 : u8),
+         (130 : u8),
+         (26 : u8),
+         (125 : u8),
+         (75 : u8),
+         (209 : u8),
+         (211 : u8),
+         (161 : u8),
+         (197 : u8),
+         (126 : u8),
+         (79 : u8),
+         (252 : u8),
+         (3 : u8),
+         (220 : u8),
+         (8 : u8),
+         (123 : u8),
+         (210 : u8),
+         (187 : u8),
+         (6 : u8),
+         (160 : u8),
+         (96 : u8),
+         (244 : u8),
+         (237 : u8),
+         (38 : u8),
+         (15 : u8)];
+  (Libcrux_specs_hax.Curve25519.fe_from_bytes bytes)
+
+end Libcrux_specs_hax.Hash_to_curve25519
+
+
+namespace Libcrux_specs_hax.Curve25519
 
 --  Serialise a field element to 32 bytes (little-endian).
 def fe_to_bytes (a : (RustArray u64 5)) : RustM (RustArray u8 32) := do
@@ -7269,6 +8152,25 @@ structure P256Point where
   y : (RustArray u64 4)
   z : (RustArray u64 4)
 
+end Libcrux_specs_hax.P256
+
+
+namespace Libcrux_specs_hax.Hash_to_curve_p256
+
+--  `clear_cofactor(P)` for P-256 (RFC 9380, Section 7): h_eff * P with
+--  h_eff = 1, the identity map. P-256 has prime order.
+def clear_cofactor_p256 (p : Libcrux_specs_hax.P256.P256Point) :
+    RustM Libcrux_specs_hax.P256.P256Point := do
+  (pure (Libcrux_specs_hax.P256.P256Point.mk
+    (x := (Libcrux_specs_hax.P256.P256Point.x p))
+    (y := (Libcrux_specs_hax.P256.P256Point.y p))
+    (z := (Libcrux_specs_hax.P256.P256Point.z p))))
+
+end Libcrux_specs_hax.Hash_to_curve_p256
+
+
+namespace Libcrux_specs_hax.P256
+
 @[instance] opaque Impl.AssociatedTypes :
   Core_models.Clone.Clone.AssociatedTypes P256Point :=
   by constructor <;> exact Inhabited.default
@@ -7485,6 +8387,21 @@ def fp_sub (a : (RustArray u64 4)) (b : (RustArray u64 4)) :
     (pure s)
   else
     (pure r)
+
+end Libcrux_specs_hax.P256
+
+
+namespace Libcrux_specs_hax.Hash_to_curve_p256
+
+--  -a in GF(p), as 0 - a. `fp_sub` sends (0, 0) to 0, so the result is
+--  canonical for every canonical `a`.
+def h2c_p256_negate (a : (RustArray u64 4)) : RustM (RustArray u64 4) := do
+  (Libcrux_specs_hax.P256.fp_sub H2C_P256_ZERO a)
+
+end Libcrux_specs_hax.Hash_to_curve_p256
+
+
+namespace Libcrux_specs_hax.P256
 
 --  Field negation: (-a) mod p.
 def fp_neg (a : (RustArray u64 4)) : RustM (RustArray u64 4) := do
@@ -8303,9 +9220,10 @@ def reduce_mod_p (c : (RustArray u64 8)) : RustM (RustArray u64 4) := do
       (Rust_primitives.Hax.Tuple2.mk carry r)
       (fun ⟨carry, r⟩ =>
         (do
-        let ⟨s, _⟩ ← (add256 r P256_P);
+        let ⟨s, carry_out⟩ ← (add256 r P256_P);
         let r : (RustArray u64 4) := s;
-        let carry : i128 ← (carry +? (1 : i128));
+        let carry : i128 ←
+          (carry +? (← (Rust_primitives.Hax.cast_op carry_out)));
         (pure (Rust_primitives.Hax.Tuple2.mk carry r)) :
         RustM (Rust_primitives.Hax.Tuple2 i128 (RustArray u64 4)))));
   let ⟨carry, r⟩ ←
@@ -8320,9 +9238,10 @@ def reduce_mod_p (c : (RustArray u64 8)) : RustM (RustArray u64 4) := do
       (Rust_primitives.Hax.Tuple2.mk carry r)
       (fun ⟨carry, r⟩ =>
         (do
-        let ⟨s, _⟩ ← (sub256 r P256_P);
+        let ⟨s, borrow_out⟩ ← (sub256 r P256_P);
         let r : (RustArray u64 4) := s;
-        let carry : i128 ← (carry -? (1 : i128));
+        let carry : i128 ←
+          (carry -? (← (Rust_primitives.Hax.cast_op borrow_out)));
         (pure (Rust_primitives.Hax.Tuple2.mk carry r)) :
         RustM (Rust_primitives.Hax.Tuple2 i128 (RustArray u64 4)))));
   let r : (RustArray u64 4) ←
@@ -8353,6 +9272,159 @@ def fp_mul (a : (RustArray u64 4)) (b : (RustArray u64 4)) :
 
 --  Field squaring: a^2 mod p.
 def fp_sq (a : (RustArray u64 4)) : RustM (RustArray u64 4) := do (fp_mul a a)
+
+end Libcrux_specs_hax.P256
+
+
+namespace Libcrux_specs_hax.Hash_to_curve_p256
+
+--  a^e in GF(p) for a PUBLIC exponent `e`, a 256-bit integer in big-endian
+--  limb order, by left-to-right square-and-multiply.
+-- 
+--  The loop branches on the bits of `e`. Every exponent this module passes
+--  is a constant of the suite, so the branch does not depend on a secret;
+--  `a` is only squared and multiplied. `e` must not be derived from a secret.
+def h2c_p256_pow_public (a : (RustArray u64 4)) (e : (RustArray u64 4)) :
+    RustM (RustArray u64 4) := do
+  let r : (RustArray u64 4) := H2C_P256_ONE;
+  let r : (RustArray u64 4) ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      (256 : usize)
+      (fun r _ => (do (pure true) : RustM Bool))
+      r
+      (fun r i =>
+        (do
+        let r : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sq r);
+        let word_idx : usize ← (i /? (64 : usize));
+        let bit_idx : u32 ←
+          (Rust_primitives.Hax.cast_op
+            (← ((63 : usize) -? (← (i %? (64 : usize))))));
+        if
+        (← (Rust_primitives.Hax.Machine_int.eq
+          (← ((← ((← e[word_idx]_?) >>>? bit_idx)) &&&? (1 : u64)))
+          (1 : u64))) then
+          let r : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul r a);
+          (pure r)
+        else
+          (pure r) :
+        RustM (RustArray u64 4))));
+  (pure r)
+
+--  `sqrt_ratio_3mod4(u, v)` (RFC 9380, Appendix F.2.1.2), for v != 0.
+-- 
+--  Returns `(b, y)` with b = 1 and y = sqrt(u / v) if u / v is a square in
+--  GF(p), and b = 0 and y = sqrt(Z * (u / v)) otherwise.
+-- 
+--  The exponentiation of step 4 is `h2c_p256_pow_public` with the constant
+--  exponent c1 = (p - 3) / 4.
+def sqrt_ratio_3mod4 (u : (RustArray u64 4)) (v : (RustArray u64 4)) :
+    RustM (Rust_primitives.Hax.Tuple2 u64 (RustArray u64 4)) := do
+  let tv1 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sq v);
+  let tv2 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul u v);
+  let tv1 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul tv1 tv2);
+  let y1 : (RustArray u64 4) ← (h2c_p256_pow_public tv1 H2C_P256_C1);
+  let y1 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul y1 tv2);
+  let y2 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul y1 H2C_P256_C2);
+  let tv3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sq y1);
+  let tv3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul tv3 v);
+  let is_qr : u64 ← (h2c_p256_ct_eq tv3 u);
+  let y : (RustArray u64 4) ← (h2c_p256_select is_qr y1 y2);
+  (pure (Rust_primitives.Hax.Tuple2.mk is_qr y))
+
+--  P + Q on P-256 for Jacobian points, by the complete addition formulas of
+--  Renes, Costello and Batina, "Complete addition formulas for prime order
+--  elliptic curves" (EUROCRYPT 2016), Algorithm 4 (a = -3), in homogeneous
+--  projective coordinates.
+-- 
+--  The formulas hold for every pair of points of the curve, including
+--  P = Q, P = -Q and the point at infinity, so the function is a
+--  straight-line program; `crate::p256::point_add` computes the same group
+--  law with a case distinction on its arguments.
+-- 
+--  The Jacobian point (X, Y, Z) is the homogeneous point (X * Z, Y, Z^3), and
+--  the homogeneous result (X3, Y3, Z3) is the Jacobian point
+--  (X3 * Z3, Y3 * Z3^2, Z3). The point at infinity must have Y != 0 on input,
+--  as in `crate::p256::point_identity`, and is returned as (0, 1, 0).
+def h2c_p256_point_add_complete
+    (p : Libcrux_specs_hax.P256.P256Point)
+    (q : Libcrux_specs_hax.P256.P256Point) :
+    RustM Libcrux_specs_hax.P256.P256Point := do
+  let b : (RustArray u64 4) := Libcrux_specs_hax.P256.P256_B;
+  let x1 : (RustArray u64 4) ←
+    (Libcrux_specs_hax.P256.fp_mul
+      (Libcrux_specs_hax.P256.P256Point.x p)
+      (Libcrux_specs_hax.P256.P256Point.z p));
+  let y1 : (RustArray u64 4) := (Libcrux_specs_hax.P256.P256Point.y p);
+  let z1 : (RustArray u64 4) ←
+    (Libcrux_specs_hax.P256.fp_mul
+      (← (Libcrux_specs_hax.P256.fp_sq (Libcrux_specs_hax.P256.P256Point.z p)))
+      (Libcrux_specs_hax.P256.P256Point.z p));
+  let x2 : (RustArray u64 4) ←
+    (Libcrux_specs_hax.P256.fp_mul
+      (Libcrux_specs_hax.P256.P256Point.x q)
+      (Libcrux_specs_hax.P256.P256Point.z q));
+  let y2 : (RustArray u64 4) := (Libcrux_specs_hax.P256.P256Point.y q);
+  let z2 : (RustArray u64 4) ←
+    (Libcrux_specs_hax.P256.fp_mul
+      (← (Libcrux_specs_hax.P256.fp_sq (Libcrux_specs_hax.P256.P256Point.z q)))
+      (Libcrux_specs_hax.P256.P256Point.z q));
+  let t0 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul x1 x2);
+  let t1 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul y1 y2);
+  let t2 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul z1 z2);
+  let t3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add x1 y1);
+  let t4 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add x2 y2);
+  let t3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul t3 t4);
+  let t4 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add t0 t1);
+  let t3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sub t3 t4);
+  let t4 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add y1 z1);
+  let x3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add y2 z2);
+  let t4 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul t4 x3);
+  let x3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add t1 t2);
+  let t4 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sub t4 x3);
+  let x3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add x1 z1);
+  let y3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add x2 z2);
+  let x3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul x3 y3);
+  let y3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add t0 t2);
+  let y3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sub x3 y3);
+  let z3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul b t2);
+  let x3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sub y3 z3);
+  let z3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add x3 x3);
+  let x3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add x3 z3);
+  let z3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sub t1 x3);
+  let x3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add t1 x3);
+  let y3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul b y3);
+  let t1 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add t2 t2);
+  let t2 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add t1 t2);
+  let y3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sub y3 t2);
+  let y3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sub y3 t0);
+  let t1 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add y3 y3);
+  let y3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add t1 y3);
+  let t1 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add t0 t0);
+  let t0 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add t1 t0);
+  let t0 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sub t0 t2);
+  let t1 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul t4 y3);
+  let t2 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul t0 y3);
+  let y3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul x3 z3);
+  let y3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add y3 t2);
+  let x3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul t3 x3);
+  let x3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sub x3 t1);
+  let z3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul t4 z3);
+  let t1 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul t3 t0);
+  let z3 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add z3 t1);
+  let is_inf : u64 ← (h2c_p256_is_zero z3);
+  let xj : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul x3 z3);
+  let yj : (RustArray u64 4) ←
+    (Libcrux_specs_hax.P256.fp_mul y3 (← (Libcrux_specs_hax.P256.fp_sq z3)));
+  (pure (Libcrux_specs_hax.P256.P256Point.mk
+    (x := xj)
+    (y := (← (h2c_p256_select is_inf H2C_P256_ONE yj)))
+    (z := z3)))
+
+end Libcrux_specs_hax.Hash_to_curve_p256
+
+
+namespace Libcrux_specs_hax.P256
 
 --  Field inversion via Fermat's little theorem: a^(p-2) mod p.
 def fp_inv (a : (RustArray u64 4)) : RustM (RustArray u64 4) := do
@@ -8401,6 +9473,75 @@ def fp_inv (a : (RustArray u64 4)) : RustM (RustArray u64 4) := do
         (pure (Rust_primitives.Hax.Tuple2.mk bit_pos result)) :
         RustM (Rust_primitives.Hax.Tuple2 i32 (RustArray u64 4)))));
   (pure result)
+
+end Libcrux_specs_hax.P256
+
+
+namespace Libcrux_specs_hax.Hash_to_curve_p256
+
+--  inv0(x) (RFC 9380, Section 4): the multiplicative inverse of x, extended
+--  by inv0(0) = 0. It is x^(q - 2), which `fp_inv` computes.
+def h2c_p256_inv0 (x : (RustArray u64 4)) : RustM (RustArray u64 4) := do
+  (Libcrux_specs_hax.P256.fp_inv x)
+
+--  `map_to_curve_simple_swu(u)` (RFC 9380, Appendix F.2) for P-256:
+--  A = -3, B = `P256_B`, Z = -10, and sqrt_ratio = `sqrt_ratio_3mod4`.
+-- 
+--  Returns the affine coordinates `(x, y)` of a point of the curve, both
+--  canonical. The denominator tv4 of step 25 is nonzero for every u, and the
+--  division is a multiplication by `h2c_p256_inv0(tv4)`.
+def map_to_curve_simple_swu (u : (RustArray u64 4)) :
+    RustM (Rust_primitives.Hax.Tuple2 (RustArray u64 4) (RustArray u64 4)) := do
+  let tv1 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sq u);
+  let tv1 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul H2C_P256_Z tv1);
+  let tv2 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sq tv1);
+  let tv2 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add tv2 tv1);
+  let tv3 : (RustArray u64 4) ←
+    (Libcrux_specs_hax.P256.fp_add tv2 H2C_P256_ONE);
+  let tv3 : (RustArray u64 4) ←
+    (Libcrux_specs_hax.P256.fp_mul Libcrux_specs_hax.P256.P256_B tv3);
+  let tv4 : (RustArray u64 4) ←
+    (h2c_p256_select
+      (← (h2c_p256_is_zero tv2))
+      H2C_P256_Z
+      (← (h2c_p256_negate tv2)));
+  let tv4 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul H2C_P256_A tv4);
+  let tv2 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sq tv3);
+  let tv6 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_sq tv4);
+  let tv5 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul H2C_P256_A tv6);
+  let tv2 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add tv2 tv5);
+  let tv2 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul tv2 tv3);
+  let tv6 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul tv6 tv4);
+  let tv5 : (RustArray u64 4) ←
+    (Libcrux_specs_hax.P256.fp_mul Libcrux_specs_hax.P256.P256_B tv6);
+  let tv2 : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_add tv2 tv5);
+  let x : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul tv1 tv3);
+  let ⟨is_gx1_square, y1⟩ ← (sqrt_ratio_3mod4 tv2 tv6);
+  let y : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul tv1 u);
+  let y : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_mul y y1);
+  let x : (RustArray u64 4) ← (h2c_p256_select is_gx1_square tv3 x);
+  let y : (RustArray u64 4) ← (h2c_p256_select is_gx1_square y1 y);
+  let e1 : u64 ←
+    ((1 : u64) ^^^? (← ((← (h2c_p256_sgn0 u)) ^^^? (← (h2c_p256_sgn0 y)))));
+  let y : (RustArray u64 4) ← (h2c_p256_select e1 y (← (h2c_p256_negate y)));
+  let x : (RustArray u64 4) ←
+    (Libcrux_specs_hax.P256.fp_mul x (← (h2c_p256_inv0 tv4)));
+  (pure (Rust_primitives.Hax.Tuple2.mk x y))
+
+--  `map_to_curve(u)` for the P-256 suites, as a `P256Point` with Z = 1.
+--  The Simplified SWU method never returns the point at infinity.
+def map_to_curve_p256 (u : (RustArray u64 4)) :
+    RustM Libcrux_specs_hax.P256.P256Point := do
+  let ⟨x, y⟩ ← (map_to_curve_simple_swu u);
+  (pure (Libcrux_specs_hax.P256.P256Point.mk
+    (x := x)
+    (y := y)
+    (z := H2C_P256_ONE)))
+
+end Libcrux_specs_hax.Hash_to_curve_p256
+
+
+namespace Libcrux_specs_hax.P256
 
 --  Encode a field element to 32 bytes (big-endian).
 def fp_to_bytes (a : (RustArray u64 4)) : RustM (RustArray u8 32) := do
@@ -8497,6 +9638,160 @@ def fp_from_bytes (b : (RustArray u8 32)) : RustM (RustArray u64 4) := do
         (pure (Rust_primitives.Hax.Tuple2.mk i r)) :
         RustM (Rust_primitives.Hax.Tuple2 usize (RustArray u64 4)))));
   (pure r)
+
+end Libcrux_specs_hax.P256
+
+
+namespace Libcrux_specs_hax.Hash_to_field
+
+--  OS2IP(tv) mod p for the P-256 prime and a 48-byte big-endian string `tv`
+--  (RFC 9380, Section 5.2, step 7), as a canonical `P256FieldElement`.
+-- 
+--  With `hi = OS2IP(tv[0..16])` and `lo = OS2IP(tv[16..48])`, the value is
+--  `hi * 2^256 + lo`. `fp_add(lo, 0)` reduces `lo < 2^256 < 2 * p` to its
+--  canonical representative.
+def fp256_from_be48 (tv : (RustArray u8 48)) : RustM (RustArray u64 4) := do
+  let hi_be : (RustArray u8 32) ←
+    (Rust_primitives.Hax.repeat (0 : u8) (32 : usize));
+  let lo_be : (RustArray u8 32) ←
+    (Rust_primitives.Hax.repeat (0 : u8) (32 : usize));
+  let hi_be : (RustArray u8 32) ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      (16 : usize)
+      (fun hi_be _ => (do (pure true) : RustM Bool))
+      hi_be
+      (fun hi_be i =>
+        (do
+        (Rust_primitives.Hax.Monomorphized_update_at.update_at_usize
+          hi_be
+          (← ((16 : usize) +? i))
+          (← tv[i]_?)) :
+        RustM (RustArray u8 32))));
+  let lo_be : (RustArray u8 32) ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      (32 : usize)
+      (fun lo_be _ => (do (pure true) : RustM Bool))
+      lo_be
+      (fun lo_be i =>
+        (do
+        (Rust_primitives.Hax.Monomorphized_update_at.update_at_usize
+          lo_be
+          i
+          (← tv[(← ((16 : usize) +? i))]_?)) :
+        RustM (RustArray u8 32))));
+  let hi : (RustArray u64 4) ← (Libcrux_specs_hax.P256.fp_from_bytes hi_be);
+  let lo : (RustArray u64 4) ←
+    (Libcrux_specs_hax.P256.fp_add
+      (← (Libcrux_specs_hax.P256.fp_from_bytes lo_be))
+      #v[(0 : u64), (0 : u64), (0 : u64), (0 : u64)]);
+  (Libcrux_specs_hax.P256.fp_add
+    (← (Libcrux_specs_hax.P256.fp_mul hi P256_TWO_256))
+    lo)
+
+--  `hash_to_field(msg, count)` of RFC 9380, Section 5.2, with F the P-256
+--  base field, m = 1, L = 48 and expand_message = `expand_message_xmd_sha256`:
+--  the parameters of the P-256 suites (Section 8.2). Each output is a
+--  canonical `P256FieldElement`.
+-- 
+--  Returns `None` exactly when `expand_message_xmd_sha256(msg, DST, count * 48)`
+--  aborts, that is when `count > 170` or `len(DST) > 255`.
+def hash_to_field_p256_sha256
+    (msg : (RustSlice u8))
+    (dst : (RustSlice u8))
+    (count : usize) :
+    RustM
+    (Core_models.Option.Option
+      (Alloc.Vec.Vec (RustArray u64 4) Alloc.Alloc.Global))
+    := do
+  if
+  (← (Rust_primitives.Hax.Machine_int.gt count (← (MAX_LEN_IN_BYTES /? L_48))))
+  then
+    (pure Core_models.Option.Option.None)
+  else
+    let len_in_bytes : usize ← (count *? L_48);
+    match (← (expand_message_xmd_sha256 msg dst len_in_bytes)) with
+      | (Core_models.Option.Option.None ) =>
+        (pure Core_models.Option.Option.None)
+      | (Core_models.Option.Option.Some  uniform_bytes) =>
+        let u : (Alloc.Vec.Vec (RustArray u64 4) Alloc.Alloc.Global) ←
+          (Alloc.Vec.Impl.new (RustArray u64 4) Rust_primitives.Hax.Tuple0.mk);
+        let u : (Alloc.Vec.Vec (RustArray u64 4) Alloc.Alloc.Global) ←
+          (Rust_primitives.Hax.Folds.fold_range
+            (0 : usize)
+            count
+            (fun u _ => (do (pure true) : RustM Bool))
+            u
+            (fun u i =>
+              (do
+              let tv : (RustArray u8 48) ←
+                (substr_48
+                  (← (Core_models.Ops.Deref.Deref.deref
+                    (Alloc.Vec.Vec u8 Alloc.Alloc.Global) uniform_bytes))
+                  i);
+              let u : (Alloc.Vec.Vec (RustArray u64 4) Alloc.Alloc.Global) ←
+                (Alloc.Vec.Impl_1.push (RustArray u64 4) Alloc.Alloc.Global
+                  u
+                  (← (fp256_from_be48 tv)));
+              (pure u) :
+              RustM (Alloc.Vec.Vec (RustArray u64 4) Alloc.Alloc.Global))));
+        (pure (Core_models.Option.Option.Some u))
+
+end Libcrux_specs_hax.Hash_to_field
+
+
+namespace Libcrux_specs_hax.Hash_to_curve_p256
+
+--  `encode_to_curve(msg)` of RFC 9380, Section 3, for the suite
+--  `P256_XMD:SHA-256_SSWU_NU_` with domain separation tag `dst`.
+-- 
+--  Returns `None` exactly when `hash_to_field_p256_sha256(msg, dst, 1)`
+--  does, that is when `len(dst) > 255`.
+def encode_to_curve_p256 (msg : (RustSlice u8)) (dst : (RustSlice u8)) :
+    RustM (Core_models.Option.Option Libcrux_specs_hax.P256.P256Point) := do
+  match
+    (← (Libcrux_specs_hax.Hash_to_field.hash_to_field_p256_sha256
+      msg
+      dst
+      (1 : usize)))
+  with
+    | (Core_models.Option.Option.None ) => (pure Core_models.Option.Option.None)
+    | (Core_models.Option.Option.Some  u) =>
+      let q : Libcrux_specs_hax.P256.P256Point ←
+        (map_to_curve_p256 (← u[(0 : usize)]_?));
+      (pure (Core_models.Option.Option.Some (← (clear_cofactor_p256 q))))
+
+--  `hash_to_curve(msg)` of RFC 9380, Section 3, for the suite
+--  `P256_XMD:SHA-256_SSWU_RO_` with domain separation tag `dst`.
+-- 
+--  The addition of step 4 is `h2c_p256_point_add_complete`; the result is a
+--  Jacobian point, and it is the point at infinity when Q0 = -Q1.
+-- 
+--  Returns `None` exactly when `hash_to_field_p256_sha256(msg, dst, 2)`
+--  does, that is when `len(dst) > 255`.
+def hash_to_curve_p256 (msg : (RustSlice u8)) (dst : (RustSlice u8)) :
+    RustM (Core_models.Option.Option Libcrux_specs_hax.P256.P256Point) := do
+  match
+    (← (Libcrux_specs_hax.Hash_to_field.hash_to_field_p256_sha256
+      msg
+      dst
+      (2 : usize)))
+  with
+    | (Core_models.Option.Option.None ) => (pure Core_models.Option.Option.None)
+    | (Core_models.Option.Option.Some  u) =>
+      let q0 : Libcrux_specs_hax.P256.P256Point ←
+        (map_to_curve_p256 (← u[(0 : usize)]_?));
+      let q1 : Libcrux_specs_hax.P256.P256Point ←
+        (map_to_curve_p256 (← u[(1 : usize)]_?));
+      let r : Libcrux_specs_hax.P256.P256Point ←
+        (h2c_p256_point_add_complete q0 q1);
+      (pure (Core_models.Option.Option.Some (← (clear_cofactor_p256 r))))
+
+end Libcrux_specs_hax.Hash_to_curve_p256
+
+
+namespace Libcrux_specs_hax.P256
 
 --  Compare two 256-bit numbers for the scalar field.
 def cmp256_n (a : (RustArray u64 4)) (b : (RustArray u64 4)) : RustM i32 := do
@@ -8932,7 +10227,7 @@ def point_from_uncompressed (bytes : (RustArray u8 65)) :
           (z := #v[(0 : u64), (0 : u64), (0 : u64), (1 : u64)]))))
 
 --  Get the affine x-coordinate of a point as a field element.
---  Returns [0,0,0,0] for the point at infinity.
+--  Returns `[0,0,0,0]` for the point at infinity.
 def point_affine_x (p : P256Point) : RustM (RustArray u64 4) := do
   if (← (point_is_identity p)) then
     (pure #v[(0 : u64), (0 : u64), (0 : u64), (0 : u64)])
@@ -8961,6 +10256,30 @@ structure EdPoint where
   y : (RustArray u64 5)
   z : (RustArray u64 5)
   t : (RustArray u64 5)
+
+end Libcrux_specs_hax.Edwards25519
+
+
+namespace Libcrux_specs_hax.Hash_to_curve25519
+
+--  The edwards25519 point (xn / xd, yn / yd) in extended coordinates, for
+--  nonzero `xd` and `yd`: (X, Y, Z, T) = (xn * yd, yn * xd, xd * yd, xn * yn).
+def edwards_point_from_fractions
+    (xn : (RustArray u64 5))
+    (xd : (RustArray u64 5))
+    (yn : (RustArray u64 5))
+    (yd : (RustArray u64 5)) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  (pure (Libcrux_specs_hax.Edwards25519.EdPoint.mk
+    (x := (← (Libcrux_specs_hax.Curve25519.fe_mul xn yd)))
+    (y := (← (Libcrux_specs_hax.Curve25519.fe_mul yn xd)))
+    (z := (← (Libcrux_specs_hax.Curve25519.fe_mul xd yd)))
+    (t := (← (Libcrux_specs_hax.Curve25519.fe_mul xn yn)))))
+
+end Libcrux_specs_hax.Hash_to_curve25519
+
+
+namespace Libcrux_specs_hax.Edwards25519
 
 @[instance] opaque Impl.AssociatedTypes :
   Core_models.Clone.Clone.AssociatedTypes EdPoint :=
@@ -9046,8 +10365,8 @@ def point_identity (_ : Rust_primitives.Hax.Tuple0) : RustM EdPoint := do
 
 --  The Edwards25519 base point B.
 -- 
---  Bx = 15112221349535807912866137220509078750507884956996801397853916694561507378526
---  By = 46316835694926478169428394003475163141307993866256225615783033890098355573398
+--  Bx = 15112221349535400772501151409588531511454012693041857206046113283949847762202
+--  By = 46316835694926478169428394003475163141307993866256225615783033603165251855960
 def ed25519_base_point (_ : Rust_primitives.Hax.Tuple0) : RustM EdPoint := do
   let bx_bytes : (RustArray u8 32) :=
     #v[(26 : u8),
@@ -9213,6 +10532,24 @@ def point_double (p : EdPoint) : RustM EdPoint := do
   let t3 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul e h);
   let z3 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul f g);
   (pure (EdPoint.mk (x := x3) (y := y3) (z := z3) (t := t3)))
+
+end Libcrux_specs_hax.Edwards25519
+
+
+namespace Libcrux_specs_hax.Hash_to_curve25519
+
+--  `clear_cofactor(P)` for edwards25519 (RFC 9380, Section 7): h_eff * P with
+--  h_eff = 8, as three doublings.
+def clear_cofactor_edwards25519 (p : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  (Libcrux_specs_hax.Edwards25519.point_double
+    (← (Libcrux_specs_hax.Edwards25519.point_double
+      (← (Libcrux_specs_hax.Edwards25519.point_double p)))))
+
+end Libcrux_specs_hax.Hash_to_curve25519
+
+
+namespace Libcrux_specs_hax.Edwards25519
 
 --  Scalar multiplication: scalar * point using double-and-add.
 --  The scalar is a 256-bit little-endian byte string.
@@ -9607,8 +10944,8 @@ def sub_l (acc : (RustArray u64 5)) (l : (RustArray u64 4)) :
             i
             r2);
         let borrow : u64 ←
-          ((← (Rust_primitives.Hax.cast_op b1))
-            +? (← (Rust_primitives.Hax.cast_op b2)));
+          ((← if b1 then (pure (1 : u64)) else (pure (0 : u64)))
+            +? (← if b2 then (pure (1 : u64)) else (pure (0 : u64))));
         let i : usize ← (i +? (1 : usize));
         (pure (Rust_primitives.Hax.Tuple3.mk acc borrow i)) :
         RustM (Rust_primitives.Hax.Tuple3 (RustArray u64 5) u64 usize))));
@@ -9990,6 +11327,1132 @@ def scalar_mul_mod_l (a : (RustArray u8 32)) (b : (RustArray u8 32)) :
   (scalar_reduce result)
 
 end Libcrux_specs_hax.Edwards25519
+
+
+namespace Libcrux_specs_hax.Secret
+
+--  A secret 32-byte little-endian scalar.
+-- 
+--  The bytes leave the type only through [`Scalar::declassify`].
+structure Scalar where
+  _0 : (RustArray u8 32)
+
+@[instance] opaque Impl_1.AssociatedTypes :
+  Core_models.Clone.Clone.AssociatedTypes Scalar :=
+  by constructor <;> exact Inhabited.default
+
+@[instance] opaque Impl_1 :
+  Core_models.Clone.Clone Scalar :=
+  by constructor <;> exact Inhabited.default
+
+@[instance] opaque Impl_2.AssociatedTypes :
+  Core_models.Marker.Copy.AssociatedTypes Scalar :=
+  by constructor <;> exact Inhabited.default
+
+@[instance] opaque Impl_2 :
+  Core_models.Marker.Copy Scalar :=
+  by constructor <;> exact Inhabited.default
+
+--  A public byte string as a secret scalar.
+def Impl.from_bytes_secret (bytes : (RustArray u8 32)) : RustM Scalar := do
+  (pure (Scalar.mk bytes))
+
+--  The bytes of the scalar as a public value. Each call is a point at which
+--  the secret is released and is reviewed as such.
+def Impl.declassify (self : Scalar) : RustM (RustArray u8 32) := do
+  (pure (Scalar._0 self))
+
+end Libcrux_specs_hax.Secret
+
+
+namespace Libcrux_specs_hax.Ristretto255
+
+--  D, the Edwards d parameter of Curve25519 (RFC 9496, Section 4.1).
+-- 
+--  D = 37095705934669439343138083508754565189542113879843219016388785533085940283555
+def d (_ : Rust_primitives.Hax.Tuple0) : RustM (RustArray u64 5) := do
+  (Libcrux_specs_hax.Edwards25519.ed_d Rust_primitives.Hax.Tuple0.mk)
+
+--  SQRT_M1, a square root of -1 (RFC 9496, Section 4.1).
+-- 
+--  SQRT_M1 = 19681161376707505956807079304988542015446066515923890162744021073123829784752
+--          = 0x2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0
+def sqrt_m1 (_ : Rust_primitives.Hax.Tuple0) : RustM (RustArray u64 5) := do
+  let bytes : (RustArray u8 32) :=
+    #v[(176 : u8),
+         (160 : u8),
+         (14 : u8),
+         (74 : u8),
+         (39 : u8),
+         (27 : u8),
+         (238 : u8),
+         (196 : u8),
+         (120 : u8),
+         (228 : u8),
+         (47 : u8),
+         (173 : u8),
+         (6 : u8),
+         (24 : u8),
+         (67 : u8),
+         (47 : u8),
+         (167 : u8),
+         (215 : u8),
+         (251 : u8),
+         (61 : u8),
+         (153 : u8),
+         (0 : u8),
+         (77 : u8),
+         (43 : u8),
+         (11 : u8),
+         (223 : u8),
+         (193 : u8),
+         (79 : u8),
+         (128 : u8),
+         (36 : u8),
+         (131 : u8),
+         (43 : u8)];
+  (Libcrux_specs_hax.Curve25519.fe_from_bytes bytes)
+
+end Libcrux_specs_hax.Ristretto255
+
+
+namespace Libcrux_specs_hax.Hash_to_curve25519
+
+--  c3 = sqrt(-1) (RFC 9380, Appendix G.2.1, constant 3): the SQRT_M1 of
+--  `crate::ristretto255`.
+def elligator2_c3 (_ : Rust_primitives.Hax.Tuple0) :
+    RustM (RustArray u64 5) := do
+  (Libcrux_specs_hax.Ristretto255.sqrt_m1 Rust_primitives.Hax.Tuple0.mk)
+
+end Libcrux_specs_hax.Hash_to_curve25519
+
+
+namespace Libcrux_specs_hax.Ristretto255
+
+--  SQRT_AD_MINUS_ONE, a square root of a*d - 1 with a = -1 (RFC 9496, Section 4.1).
+-- 
+--  SQRT_AD_MINUS_ONE = 25063068953384623474111414158702152701244531502492656460079210482610430750235
+--                    = 0x376931bf2b8348ac0f3cfcc931f5d1fdaf9d8e0c1b7854bd7e97f6a0497b2e1b
+def sqrt_ad_minus_one (_ : Rust_primitives.Hax.Tuple0) :
+    RustM (RustArray u64 5) := do
+  let bytes : (RustArray u8 32) :=
+    #v[(27 : u8),
+         (46 : u8),
+         (123 : u8),
+         (73 : u8),
+         (160 : u8),
+         (246 : u8),
+         (151 : u8),
+         (126 : u8),
+         (189 : u8),
+         (84 : u8),
+         (120 : u8),
+         (27 : u8),
+         (12 : u8),
+         (142 : u8),
+         (157 : u8),
+         (175 : u8),
+         (253 : u8),
+         (209 : u8),
+         (245 : u8),
+         (49 : u8),
+         (201 : u8),
+         (252 : u8),
+         (60 : u8),
+         (15 : u8),
+         (172 : u8),
+         (72 : u8),
+         (131 : u8),
+         (43 : u8),
+         (191 : u8),
+         (49 : u8),
+         (105 : u8),
+         (55 : u8)];
+  (Libcrux_specs_hax.Curve25519.fe_from_bytes bytes)
+
+--  INVSQRT_A_MINUS_D, an inverse square root of a - d with a = -1
+--  (RFC 9496, Section 4.1).
+-- 
+--  INVSQRT_A_MINUS_D = 54469307008909316920995813868745141605393597292927456921205312896311721017578
+--                    = 0x786c8905cfaffca216c27b91fe01d8409d2f16175a4172be99c8fdaa805d40ea
+def invsqrt_a_minus_d (_ : Rust_primitives.Hax.Tuple0) :
+    RustM (RustArray u64 5) := do
+  let bytes : (RustArray u8 32) :=
+    #v[(234 : u8),
+         (64 : u8),
+         (93 : u8),
+         (128 : u8),
+         (170 : u8),
+         (253 : u8),
+         (200 : u8),
+         (153 : u8),
+         (190 : u8),
+         (114 : u8),
+         (65 : u8),
+         (90 : u8),
+         (23 : u8),
+         (22 : u8),
+         (47 : u8),
+         (157 : u8),
+         (64 : u8),
+         (216 : u8),
+         (1 : u8),
+         (254 : u8),
+         (145 : u8),
+         (123 : u8),
+         (194 : u8),
+         (22 : u8),
+         (162 : u8),
+         (252 : u8),
+         (175 : u8),
+         (207 : u8),
+         (5 : u8),
+         (137 : u8),
+         (108 : u8),
+         (120 : u8)];
+  (Libcrux_specs_hax.Curve25519.fe_from_bytes bytes)
+
+--  ONE_MINUS_D_SQ = 1 - d^2 (RFC 9496, Section 4.1).
+-- 
+--  ONE_MINUS_D_SQ = 1159843021668779879193775521855586647937357759715417654439879720876111806838
+--                 = 0x029072a8b2b3e0d79994abddbe70dfe42c81a138cd5e350fe27c09c1945fc176
+def one_minus_d_sq (_ : Rust_primitives.Hax.Tuple0) :
+    RustM (RustArray u64 5) := do
+  let bytes : (RustArray u8 32) :=
+    #v[(118 : u8),
+         (193 : u8),
+         (95 : u8),
+         (148 : u8),
+         (193 : u8),
+         (9 : u8),
+         (124 : u8),
+         (226 : u8),
+         (15 : u8),
+         (53 : u8),
+         (94 : u8),
+         (205 : u8),
+         (56 : u8),
+         (161 : u8),
+         (129 : u8),
+         (44 : u8),
+         (228 : u8),
+         (223 : u8),
+         (112 : u8),
+         (190 : u8),
+         (221 : u8),
+         (171 : u8),
+         (148 : u8),
+         (153 : u8),
+         (215 : u8),
+         (224 : u8),
+         (179 : u8),
+         (178 : u8),
+         (168 : u8),
+         (114 : u8),
+         (144 : u8),
+         (2 : u8)];
+  (Libcrux_specs_hax.Curve25519.fe_from_bytes bytes)
+
+--  D_MINUS_ONE_SQ = (d - 1)^2 (RFC 9496, Section 4.1).
+-- 
+--  D_MINUS_ONE_SQ = 40440834346308536858101042469323190826248399146238708352240133220865137265952
+--                 = 0x5968b37af66c22414cdcd32f529b4eebd29e4a2cb01e199931ad5aaa44ed4d20
+def d_minus_one_sq (_ : Rust_primitives.Hax.Tuple0) :
+    RustM (RustArray u64 5) := do
+  let bytes : (RustArray u8 32) :=
+    #v[(32 : u8),
+         (77 : u8),
+         (237 : u8),
+         (68 : u8),
+         (170 : u8),
+         (90 : u8),
+         (173 : u8),
+         (49 : u8),
+         (153 : u8),
+         (25 : u8),
+         (30 : u8),
+         (176 : u8),
+         (44 : u8),
+         (74 : u8),
+         (158 : u8),
+         (210 : u8),
+         (235 : u8),
+         (78 : u8),
+         (155 : u8),
+         (82 : u8),
+         (47 : u8),
+         (211 : u8),
+         (220 : u8),
+         (76 : u8),
+         (65 : u8),
+         (34 : u8),
+         (108 : u8),
+         (246 : u8),
+         (122 : u8),
+         (179 : u8),
+         (104 : u8),
+         (89 : u8)];
+  (Libcrux_specs_hax.Curve25519.fe_from_bytes bytes)
+
+--  Field negation: -a mod p.
+def fe_neg (a : (RustArray u64 5)) : RustM (RustArray u64 5) := do
+  (Libcrux_specs_hax.Curve25519.fe_sub
+    (← (Libcrux_specs_hax.Curve25519.fe_zero Rust_primitives.Hax.Tuple0.mk))
+    a)
+
+--  IS_NEGATIVE (RFC 9496, Section 2.1): 1 if the least nonnegative integer
+--  representing `a` is odd, 0 if it is even.
+def fe_is_negative (a : (RustArray u64 5)) : RustM u64 := do
+  let bytes : (RustArray u8 32) ← (Libcrux_specs_hax.Curve25519.fe_to_bytes a);
+  (Rust_primitives.Hax.cast_op (← ((← bytes[(0 : usize)]_?) &&&? (1 : u8))))
+
+end Libcrux_specs_hax.Ristretto255
+
+
+namespace Libcrux_specs_hax.Hash_to_curve25519
+
+--  sgn0(x) for m = 1 (RFC 9380, Section 4.1): x mod 2, where x is the least
+--  nonnegative integer representing the field element.
+def h2c_sgn0 (x : (RustArray u64 5)) : RustM u64 := do
+  (Libcrux_specs_hax.Ristretto255.fe_is_negative x)
+
+end Libcrux_specs_hax.Hash_to_curve25519
+
+
+namespace Libcrux_specs_hax.Ristretto255
+
+--  CT_EQ (RFC 9496, Section 2.2): 1 if a = b in the field, 0 otherwise.
+-- 
+--  Compares the canonical 32-byte encodings without branching.
+def fe_ct_eq (a : (RustArray u64 5)) (b : (RustArray u64 5)) : RustM u64 := do
+  let a_bytes : (RustArray u8 32) ←
+    (Libcrux_specs_hax.Curve25519.fe_to_bytes a);
+  let b_bytes : (RustArray u8 32) ←
+    (Libcrux_specs_hax.Curve25519.fe_to_bytes b);
+  let acc : u8 := (0 : u8);
+  let acc : u8 ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      (32 : usize)
+      (fun acc _ => (do (pure true) : RustM Bool))
+      acc
+      (fun acc i =>
+        (do
+        (Rust_primitives.Hax.Machine_int.bitor
+          acc
+          (← ((← a_bytes[i]_?) ^^^? (← b_bytes[i]_?)))) :
+        RustM u8)));
+  ((← (Core_models.Num.Impl_9.wrapping_sub
+      (← (Rust_primitives.Hax.cast_op acc))
+      (1 : u64)))
+    >>>? (63 : i32))
+
+--  1 if `a` is zero in the field, 0 otherwise.
+def fe_is_zero (a : (RustArray u64 5)) : RustM u64 := do
+  (fe_ct_eq
+    a
+    (← (Libcrux_specs_hax.Curve25519.fe_zero Rust_primitives.Hax.Tuple0.mk)))
+
+end Libcrux_specs_hax.Ristretto255
+
+
+namespace Libcrux_specs_hax.Hash_to_curve25519
+
+--  The birational map from edwards25519 to curve25519 (RFC 7748,
+--  Section 4.1), inverse to `mont_to_edwards`:
+-- 
+--    (x, y) maps to (u, v) = ((1 + y) / (1 - y), sqrt(-486664) * u / x),
+-- 
+--  the identity (0, 1) maps to the point at infinity, and (0, -1) maps to
+--  (0, 0), which the formula gives with inv0(0) = 0.
+def mont_from_edwards (p : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM MontPoint := do
+  let den : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_sub
+      (Libcrux_specs_hax.Edwards25519.EdPoint.z p)
+      (Libcrux_specs_hax.Edwards25519.EdPoint.y p));
+  let is_inf : u64 ← (Libcrux_specs_hax.Ristretto255.fe_is_zero den);
+  let u : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (Libcrux_specs_hax.Curve25519.fe_add
+        (Libcrux_specs_hax.Edwards25519.EdPoint.z p)
+        (Libcrux_specs_hax.Edwards25519.EdPoint.y p)))
+      (← (Libcrux_specs_hax.Curve25519.fe_inv den)));
+  let v : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        (← (sqrt_neg_486664 Rust_primitives.Hax.Tuple0.mk))
+        u))
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        (Libcrux_specs_hax.Edwards25519.EdPoint.z p)
+        (← (Libcrux_specs_hax.Curve25519.fe_inv
+          (Libcrux_specs_hax.Edwards25519.EdPoint.x p))))));
+  (pure (MontPoint.mk
+    (u := (← (Libcrux_specs_hax.Curve25519.fe_reduce u)))
+    (v := (← (Libcrux_specs_hax.Curve25519.fe_reduce v)))
+    (infinity := is_inf)))
+
+end Libcrux_specs_hax.Hash_to_curve25519
+
+
+namespace Libcrux_specs_hax.Ristretto255
+
+--  CT_SELECT (RFC 9496, Section 2.2): `then_v` if `cond` is 1, `else_v` if
+--  `cond` is 0. Reads `CT_SELECT(then_v IF cond ELSE else_v)`.
+def fe_select
+    (cond : u64)
+    (then_v : (RustArray u64 5))
+    (else_v : (RustArray u64 5)) :
+    RustM (RustArray u64 5) := do
+  let mask : u64 ← (Core_models.Num.Impl_9.wrapping_neg cond);
+  let r : (RustArray u64 5) ←
+    (Rust_primitives.Hax.repeat (0 : u64) (5 : usize));
+  let r : (RustArray u64 5) ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      (5 : usize)
+      (fun r _ => (do (pure true) : RustM Bool))
+      r
+      (fun r i =>
+        (do
+        (Rust_primitives.Hax.Monomorphized_update_at.update_at_usize
+          r
+          i
+          (← (Rust_primitives.Hax.Machine_int.bitor
+            (← ((← then_v[i]_?) &&&? mask))
+            (← ((← else_v[i]_?)
+              &&&? (← (Rust_primitives.Hax.Machine_int.not mask))))))) :
+        RustM (RustArray u64 5))));
+  (pure r)
+
+end Libcrux_specs_hax.Ristretto255
+
+
+namespace Libcrux_specs_hax.Hash_to_curve25519
+
+--  Steps 2 to 13 of `map_to_curve_elligator2_edwards25519`
+--  (RFC 9380, Appendix G.2.2): the rational map of Section 6.8.1 applied to
+--  the curve25519 point (xmn / xmd, ymn / ymd), with both exceptional cases
+--  (a zero denominator) sent to the identity (0, 1).
+-- 
+--  Returns `(xn, xd, yn, yd)` such that (xn / xd, yn / yd) is a point of
+--  edwards25519, with `xd` and `yd` nonzero.
+def h2c_rational_map_fractions
+    (xmn : (RustArray u64 5))
+    (xmd : (RustArray u64 5))
+    (ymn : (RustArray u64 5))
+    (ymd : (RustArray u64 5)) :
+    RustM
+    (Rust_primitives.Hax.Tuple4
+      (RustArray u64 5)
+      (RustArray u64 5)
+      (RustArray u64 5)
+      (RustArray u64 5))
+    := do
+  let zero : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_zero Rust_primitives.Hax.Tuple0.mk);
+  let one : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_one Rust_primitives.Hax.Tuple0.mk);
+  let c1 : (RustArray u64 5) ← (sqrt_neg_486664 Rust_primitives.Hax.Tuple0.mk);
+  let xn : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul xmn ymd);
+  let xn : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul xn c1);
+  let xd : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul xmd ymn);
+  let yn : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sub xmn xmd);
+  let yd : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_add xmn xmd);
+  let tv1 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul xd yd);
+  let e : u64 ← (Libcrux_specs_hax.Ristretto255.fe_is_zero tv1);
+  let xn : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select e zero xn);
+  let xd : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select e one xd);
+  let yn : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select e one yn);
+  let yd : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select e one yd);
+  (pure (Rust_primitives.Hax.Tuple4.mk xn xd yn yd))
+
+--  The birational map from curve25519 to edwards25519 (RFC 7748,
+--  Section 4.1; RFC 9380, Section 6.8.1 and Appendix D.1), as a group
+--  isomorphism:
+-- 
+--    (u, v) maps to (x, y) = (sqrt(-486664) * u / v, (u - 1) / (u + 1)),
+-- 
+--  the point at infinity maps to the identity (0, 1), and the point (0, 0)
+--  of order 2 maps to the point (0, -1) of order 2. No point of curve25519
+--  has u = -1, since 486660 is not a square, so v = 0 is the only zero
+--  denominator of an affine point.
+-- 
+--  This differs from steps 8 to 12 of RFC 9380, Appendix G.2.2 on the single
+--  point (0, 0), which those steps send to the identity.
+def mont_to_edwards (p : MontPoint) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  let zero : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_zero Rust_primitives.Hax.Tuple0.mk);
+  let one : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_one Rust_primitives.Hax.Tuple0.mk);
+  let is_inf : u64 := (MontPoint.infinity p);
+  let is_two : u64 ←
+    ((← (Libcrux_specs_hax.Ristretto255.fe_is_zero (MontPoint.v p)))
+      &&&? (← ((1 : u64) -? is_inf)));
+  let special : u64 ← (Rust_primitives.Hax.Machine_int.bitor is_inf is_two);
+  let xn : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (sqrt_neg_486664 Rust_primitives.Hax.Tuple0.mk))
+      (MontPoint.u p));
+  let xd : (RustArray u64 5) := (MontPoint.v p);
+  let yn : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_sub (MontPoint.u p) one);
+  let yd : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_add (MontPoint.u p) one);
+  let xn : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select special zero xn);
+  let xd : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select special one xd);
+  let yn : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select
+      is_inf
+      one
+      (← (Libcrux_specs_hax.Ristretto255.fe_select
+        is_two
+        (← (Libcrux_specs_hax.Ristretto255.fe_neg one))
+        yn)));
+  let yd : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select special one yd);
+  (edwards_point_from_fractions xn xd yn yd)
+
+--  Point addition on curve25519: the edwards25519 addition transported along
+--  the group isomorphism `mont_to_edwards`.
+def mont_point_add (p : MontPoint) (q : MontPoint) : RustM MontPoint := do
+  (mont_from_edwards
+    (← (Libcrux_specs_hax.Edwards25519.point_add
+      (← (mont_to_edwards p))
+      (← (mont_to_edwards q)))))
+
+--  `clear_cofactor(P)` for curve25519 (RFC 9380, Section 7): h_eff * P with
+--  h_eff = 8.
+-- 
+--  The multiplication is carried out on edwards25519: the result is
+--  `mont_from_edwards(8 * mont_to_edwards(P))`. `mont_to_edwards` is a group
+--  isomorphism with inverse `mont_from_edwards`, so this is 8 * P on
+--  curve25519. RFC 9380, Appendix D.1 allows evaluating a Montgomery suite
+--  through the equivalent twisted Edwards curve, and this crate has no
+--  Montgomery point addition outside the x-only ladder.
+def clear_cofactor_curve25519 (p : MontPoint) : RustM MontPoint := do
+  (mont_from_edwards (← (clear_cofactor_edwards25519 (← (mont_to_edwards p)))))
+
+end Libcrux_specs_hax.Hash_to_curve25519
+
+
+namespace Libcrux_specs_hax.Ristretto255
+
+--  CT_ABS (RFC 9496, Section 2.2): -a if IS_NEGATIVE(a), else a.
+def fe_abs (a : (RustArray u64 5)) : RustM (RustArray u64 5) := do
+  (fe_select (← (fe_is_negative a)) (← (fe_neg a)) a)
+
+--  Compute a^(2^n) by n squarings.
+def fe_sq_n (a : (RustArray u64 5)) (n : usize) : RustM (RustArray u64 5) := do
+  let r : (RustArray u64 5) := a;
+  let r : (RustArray u64 5) ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      n
+      (fun r _ => (do (pure true) : RustM Bool))
+      r
+      (fun r _i =>
+        (do (Libcrux_specs_hax.Curve25519.fe_sq r) : RustM (RustArray u64 5))));
+  (pure r)
+
+--  Compute z^((p-5)/8) = z^(2^252 - 3), the exponent of RFC 9496,
+--  Section 4.2, by a fixed addition chain.
+def fe_pow22523 (z : (RustArray u64 5)) : RustM (RustArray u64 5) := do
+  let z2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq z);
+  let z8 : (RustArray u64 5) ← (fe_sq_n z2 (2 : usize));
+  let z9 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul z8 z);
+  let z11 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul z9 z2);
+  let z22 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq z11);
+  let z_5_0 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul z22 z9);
+  let z_10_0 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul (← (fe_sq_n z_5_0 (5 : usize))) z_5_0);
+  let z_20_0 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (fe_sq_n z_10_0 (10 : usize)))
+      z_10_0);
+  let z_40_0 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (fe_sq_n z_20_0 (20 : usize)))
+      z_20_0);
+  let z_50_0 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (fe_sq_n z_40_0 (10 : usize)))
+      z_10_0);
+  let z_100_0 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (fe_sq_n z_50_0 (50 : usize)))
+      z_50_0);
+  let z_200_0 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (fe_sq_n z_100_0 (100 : usize)))
+      z_100_0);
+  let z_250_0 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (fe_sq_n z_200_0 (50 : usize)))
+      z_50_0);
+  let z_252_2 : (RustArray u64 5) ← (fe_sq_n z_250_0 (2 : usize));
+  (Libcrux_specs_hax.Curve25519.fe_mul z_252_2 z)
+
+end Libcrux_specs_hax.Ristretto255
+
+
+namespace Libcrux_specs_hax.Hash_to_curve25519
+
+--  `map_to_curve_elligator2_curve25519(u)` (RFC 9380, Appendix G.2.1).
+-- 
+--  Returns `(xn, xd, yn, yd)` such that (xn / xd, yn / yd) is a point of
+--  curve25519. `xd` is nonzero and `yd` is 1.
+-- 
+--  The exponentiation by c4 = (q - 5) / 8 of step 16 is `fe_pow22523`.
+def map_to_curve_elligator2_curve25519 (u : (RustArray u64 5)) :
+    RustM
+    (Rust_primitives.Hax.Tuple4
+      (RustArray u64 5)
+      (RustArray u64 5)
+      (RustArray u64 5)
+      (RustArray u64 5))
+    := do
+  let one : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_one Rust_primitives.Hax.Tuple0.mk);
+  let j : (RustArray u64 5) ← (mont_j Rust_primitives.Hax.Tuple0.mk);
+  let c2 : (RustArray u64 5) ← (elligator2_c2 Rust_primitives.Hax.Tuple0.mk);
+  let c3 : (RustArray u64 5) ← (elligator2_c3 Rust_primitives.Hax.Tuple0.mk);
+  let tv1 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq u);
+  let tv1 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_add tv1 tv1);
+  let xd : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_add tv1 one);
+  let x1n : (RustArray u64 5) ← (Libcrux_specs_hax.Ristretto255.fe_neg j);
+  let tv2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq xd);
+  let gxd : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul tv2 xd);
+  let gx1 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul j tv1);
+  let gx1 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul gx1 x1n);
+  let gx1 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_add gx1 tv2);
+  let gx1 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul gx1 x1n);
+  let tv3 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq gxd);
+  let tv2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq tv3);
+  let tv3 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul tv3 gxd);
+  let tv3 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul tv3 gx1);
+  let tv2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul tv2 tv3);
+  let y11 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_pow22523 tv2);
+  let y11 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul y11 tv3);
+  let y12 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul y11 c3);
+  let tv2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq y11);
+  let tv2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul tv2 gxd);
+  let e1 : u64 ← (Libcrux_specs_hax.Ristretto255.fe_ct_eq tv2 gx1);
+  let y1 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select e1 y11 y12);
+  let x2n : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul x1n tv1);
+  let y21 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul y11 u);
+  let y21 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul y21 c2);
+  let y22 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul y21 c3);
+  let gx2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul gx1 tv1);
+  let tv2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq y21);
+  let tv2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul tv2 gxd);
+  let e2 : u64 ← (Libcrux_specs_hax.Ristretto255.fe_ct_eq tv2 gx2);
+  let y2 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select e2 y21 y22);
+  let tv2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq y1);
+  let tv2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul tv2 gxd);
+  let e3 : u64 ← (Libcrux_specs_hax.Ristretto255.fe_ct_eq tv2 gx1);
+  let xn : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select e3 x1n x2n);
+  let y : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select e3 y1 y2);
+  let e4 : u64 ← (h2c_sgn0 y);
+  let y : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Ristretto255.fe_select
+      (← (e3 ^^^? e4))
+      (← (Libcrux_specs_hax.Ristretto255.fe_neg y))
+      y);
+  (pure (Rust_primitives.Hax.Tuple4.mk xn xd y one))
+
+--  `map_to_curve_elligator2_edwards25519(u)` (RFC 9380, Appendix G.2.2).
+-- 
+--  Returns `(xn, xd, yn, yd)` such that (xn / xd, yn / yd) is a point of
+--  edwards25519, with `xd` and `yd` nonzero. Step 1 is
+--  `map_to_curve_elligator2_curve25519` and steps 2 to 13 are
+--  `h2c_rational_map_fractions`.
+def map_to_curve_elligator2_edwards25519 (u : (RustArray u64 5)) :
+    RustM
+    (Rust_primitives.Hax.Tuple4
+      (RustArray u64 5)
+      (RustArray u64 5)
+      (RustArray u64 5)
+      (RustArray u64 5))
+    := do
+  let ⟨xmn, xmd, ymn, ymd⟩ ← (map_to_curve_elligator2_curve25519 u);
+  (h2c_rational_map_fractions xmn xmd ymn ymd)
+
+--  `map_to_curve(u)` for the edwards25519 suites, as an `EdPoint`.
+def map_to_curve_edwards25519 (u : (RustArray u64 5)) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  let ⟨xn, xd, yn, yd⟩ ← (map_to_curve_elligator2_edwards25519 u);
+  (edwards_point_from_fractions xn xd yn yd)
+
+--  `map_to_curve(u)` for the curve25519 suites, as a `MontPoint`.
+def map_to_curve_curve25519 (u : (RustArray u64 5)) : RustM MontPoint := do
+  let ⟨xn, xd, yn, yd⟩ ← (map_to_curve_elligator2_curve25519 u);
+  (mont_point_from_fractions xn xd yn yd)
+
+--  `encode_to_curve(msg)` of RFC 9380, Section 3, for the suite
+--  `edwards25519_XMD:SHA-512_ELL2_NU_` with domain separation tag `dst`.
+-- 
+--  Returns `None` exactly when `hash_to_field_25519_sha512(msg, dst, 1)`
+--  does, that is when `len(dst) > 255`.
+def encode_to_curve_edwards25519 (msg : (RustSlice u8)) (dst : (RustSlice u8)) :
+    RustM
+    (Core_models.Option.Option Libcrux_specs_hax.Edwards25519.EdPoint)
+    := do
+  match
+    (← (Libcrux_specs_hax.Hash_to_field.hash_to_field_25519_sha512
+      msg
+      dst
+      (1 : usize)))
+  with
+    | (Core_models.Option.Option.None ) => (pure Core_models.Option.Option.None)
+    | (Core_models.Option.Option.Some  u) =>
+      let q : Libcrux_specs_hax.Edwards25519.EdPoint ←
+        (map_to_curve_edwards25519 (← u[(0 : usize)]_?));
+      (pure (Core_models.Option.Option.Some
+        (← (clear_cofactor_edwards25519 q))))
+
+--  `hash_to_curve(msg)` of RFC 9380, Section 3, for the suite
+--  `edwards25519_XMD:SHA-512_ELL2_RO_` with domain separation tag `dst`.
+-- 
+--  Returns `None` exactly when `hash_to_field_25519_sha512(msg, dst, 2)`
+--  does, that is when `len(dst) > 255`.
+def hash_to_curve_edwards25519 (msg : (RustSlice u8)) (dst : (RustSlice u8)) :
+    RustM
+    (Core_models.Option.Option Libcrux_specs_hax.Edwards25519.EdPoint)
+    := do
+  match
+    (← (Libcrux_specs_hax.Hash_to_field.hash_to_field_25519_sha512
+      msg
+      dst
+      (2 : usize)))
+  with
+    | (Core_models.Option.Option.None ) => (pure Core_models.Option.Option.None)
+    | (Core_models.Option.Option.Some  u) =>
+      let q0 : Libcrux_specs_hax.Edwards25519.EdPoint ←
+        (map_to_curve_edwards25519 (← u[(0 : usize)]_?));
+      let q1 : Libcrux_specs_hax.Edwards25519.EdPoint ←
+        (map_to_curve_edwards25519 (← u[(1 : usize)]_?));
+      let r : Libcrux_specs_hax.Edwards25519.EdPoint ←
+        (Libcrux_specs_hax.Edwards25519.point_add q0 q1);
+      (pure (Core_models.Option.Option.Some
+        (← (clear_cofactor_edwards25519 r))))
+
+--  `encode_to_curve(msg)` of RFC 9380, Section 3, for the suite
+--  `curve25519_XMD:SHA-512_ELL2_NU_` with domain separation tag `dst`. The
+--  result carries both affine coordinates (u, v).
+-- 
+--  Returns `None` exactly when `hash_to_field_25519_sha512(msg, dst, 1)`
+--  does, that is when `len(dst) > 255`.
+def encode_to_curve_curve25519 (msg : (RustSlice u8)) (dst : (RustSlice u8)) :
+    RustM (Core_models.Option.Option MontPoint) := do
+  match
+    (← (Libcrux_specs_hax.Hash_to_field.hash_to_field_25519_sha512
+      msg
+      dst
+      (1 : usize)))
+  with
+    | (Core_models.Option.Option.None ) => (pure Core_models.Option.Option.None)
+    | (Core_models.Option.Option.Some  u) =>
+      let q : MontPoint ← (map_to_curve_curve25519 (← u[(0 : usize)]_?));
+      (pure (Core_models.Option.Option.Some (← (clear_cofactor_curve25519 q))))
+
+--  `hash_to_curve(msg)` of RFC 9380, Section 3, for the suite
+--  `curve25519_XMD:SHA-512_ELL2_RO_` with domain separation tag `dst`. The
+--  result carries both affine coordinates (u, v).
+-- 
+--  Returns `None` exactly when `hash_to_field_25519_sha512(msg, dst, 2)`
+--  does, that is when `len(dst) > 255`.
+def hash_to_curve_curve25519 (msg : (RustSlice u8)) (dst : (RustSlice u8)) :
+    RustM (Core_models.Option.Option MontPoint) := do
+  match
+    (← (Libcrux_specs_hax.Hash_to_field.hash_to_field_25519_sha512
+      msg
+      dst
+      (2 : usize)))
+  with
+    | (Core_models.Option.Option.None ) => (pure Core_models.Option.Option.None)
+    | (Core_models.Option.Option.Some  u) =>
+      let q0 : MontPoint ← (map_to_curve_curve25519 (← u[(0 : usize)]_?));
+      let q1 : MontPoint ← (map_to_curve_curve25519 (← u[(1 : usize)]_?));
+      let r : MontPoint ← (mont_point_add q0 q1);
+      (pure (Core_models.Option.Option.Some (← (clear_cofactor_curve25519 r))))
+
+end Libcrux_specs_hax.Hash_to_curve25519
+
+
+namespace Libcrux_specs_hax.Ristretto255
+
+--  SQRT_RATIO_M1(u, v) (RFC 9496, Section 4.2).
+-- 
+--  Returns `(was_square, r)` with `was_square` in {0, 1}:
+--    * (1, +sqrt(u/v)) if u and v are nonzero and u/v is square;
+--    * (1, 0) if u is zero;
+--    * (0, 0) if v is zero and u is nonzero;
+--    * (0, +sqrt(SQRT_M1 * (u/v))) if u and v are nonzero and u/v is non-square.
+-- 
+--  Here +sqrt denotes the nonnegative square root.
+def sqrt_ratio_m1 (u : (RustArray u64 5)) (v : (RustArray u64 5)) :
+    RustM (Rust_primitives.Hax.Tuple2 u64 (RustArray u64 5)) := do
+  let v2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq v);
+  let v3 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul v2 v);
+  let v7 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (Libcrux_specs_hax.Curve25519.fe_sq v3))
+      v);
+  let r : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (Libcrux_specs_hax.Curve25519.fe_mul u v3))
+      (← (fe_pow22523 (← (Libcrux_specs_hax.Curve25519.fe_mul u v7)))));
+  let check : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      v
+      (← (Libcrux_specs_hax.Curve25519.fe_sq r)));
+  let neg_u : (RustArray u64 5) ← (fe_neg u);
+  let correct_sign_sqrt : u64 ← (fe_ct_eq check u);
+  let flipped_sign_sqrt : u64 ← (fe_ct_eq check neg_u);
+  let flipped_sign_sqrt_i : u64 ←
+    (fe_ct_eq
+      check
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        neg_u
+        (← (sqrt_m1 Rust_primitives.Hax.Tuple0.mk)))));
+  let r_prime : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (sqrt_m1 Rust_primitives.Hax.Tuple0.mk))
+      r);
+  let r : (RustArray u64 5) ←
+    (fe_select
+      (← (Rust_primitives.Hax.Machine_int.bitor
+        flipped_sign_sqrt
+        flipped_sign_sqrt_i))
+      r_prime
+      r);
+  let r : (RustArray u64 5) ← (fe_abs r);
+  let was_square : u64 ←
+    (Rust_primitives.Hax.Machine_int.bitor correct_sign_sqrt flipped_sign_sqrt);
+  (pure (Rust_primitives.Hax.Tuple2.mk was_square r))
+
+--  Decode (RFC 9496, Section 4.3.1).
+-- 
+--  Returns `None` when the string is not the canonical encoding of a field
+--  element, when s is negative, when the ratio is not a square, when t is
+--  negative, or when y = 0. Otherwise returns the internal representation
+--  (x, y, 1, t).
+def decode (bytes : (RustArray u8 32)) :
+    RustM
+    (Core_models.Option.Option Libcrux_specs_hax.Edwards25519.EdPoint)
+    := do
+  let s : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_from_bytes bytes);
+  let s_bytes : (RustArray u8 32) ←
+    (Libcrux_specs_hax.Curve25519.fe_to_bytes s);
+  let diff : u8 := (0 : u8);
+  let diff : u8 ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      (32 : usize)
+      (fun diff _ => (do (pure true) : RustM Bool))
+      diff
+      (fun diff i =>
+        (do
+        (Rust_primitives.Hax.Machine_int.bitor
+          diff
+          (← ((← s_bytes[i]_?) ^^^? (← bytes[i]_?)))) :
+        RustM u8)));
+  let canonical : u64 ←
+    ((← (Core_models.Num.Impl_9.wrapping_sub
+        (← (Rust_primitives.Hax.cast_op diff))
+        (1 : u64)))
+      >>>? (63 : i32));
+  let s_negative : u64 ← (fe_is_negative s);
+  let one : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_one Rust_primitives.Hax.Tuple0.mk);
+  let ss : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq s);
+  let u1 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sub one ss);
+  let u2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_add one ss);
+  let u2_sqr : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq u2);
+  let v : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_sub
+      (← (fe_neg
+        (← (Libcrux_specs_hax.Curve25519.fe_mul
+          (← (d Rust_primitives.Hax.Tuple0.mk))
+          (← (Libcrux_specs_hax.Curve25519.fe_sq u1))))))
+      u2_sqr);
+  let ⟨was_square, invsqrt⟩ ←
+    (sqrt_ratio_m1 one (← (Libcrux_specs_hax.Curve25519.fe_mul v u2_sqr)));
+  let den_x : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul invsqrt u2);
+  let den_y : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (Libcrux_specs_hax.Curve25519.fe_mul invsqrt den_x))
+      v);
+  let x : (RustArray u64 5) ←
+    (fe_abs
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        (← (Libcrux_specs_hax.Curve25519.fe_add s s))
+        den_x)));
+  let y : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul u1 den_y);
+  let t : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul x y);
+  let t_negative : u64 ← (fe_is_negative t);
+  let y_zero : u64 ← (fe_is_zero y);
+  let ok : u64 ←
+    ((← ((← ((← (canonical &&&? (← ((1 : u64) -? s_negative))))
+          &&&? was_square))
+        &&&? (← ((1 : u64) -? t_negative))))
+      &&&? (← ((1 : u64) -? y_zero)));
+  if (← (Rust_primitives.Hax.Machine_int.eq ok (1 : u64))) then
+    (pure (Core_models.Option.Option.Some
+      (Libcrux_specs_hax.Edwards25519.EdPoint.mk
+        (x := x)
+        (y := y)
+        (z := one)
+        (t := t))))
+  else
+    (pure Core_models.Option.Option.None)
+
+--  Encode (RFC 9496, Section 4.3.2): the canonical 32-byte encoding of the
+--  group element with internal representation (x0, y0, z0, t0).
+def encode (p : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM (RustArray u8 32) := do
+  let x0 : (RustArray u64 5) := (Libcrux_specs_hax.Edwards25519.EdPoint.x p);
+  let y0 : (RustArray u64 5) := (Libcrux_specs_hax.Edwards25519.EdPoint.y p);
+  let z0 : (RustArray u64 5) := (Libcrux_specs_hax.Edwards25519.EdPoint.z p);
+  let t0 : (RustArray u64 5) := (Libcrux_specs_hax.Edwards25519.EdPoint.t p);
+  let u1 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (Libcrux_specs_hax.Curve25519.fe_add z0 y0))
+      (← (Libcrux_specs_hax.Curve25519.fe_sub z0 y0)));
+  let u2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_mul x0 y0);
+  let ⟨_was_square, invsqrt⟩ ←
+    (sqrt_ratio_m1
+      (← (Libcrux_specs_hax.Curve25519.fe_one Rust_primitives.Hax.Tuple0.mk))
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        u1
+        (← (Libcrux_specs_hax.Curve25519.fe_sq u2)))));
+  let den1 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul invsqrt u1);
+  let den2 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul invsqrt u2);
+  let z_inv : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (Libcrux_specs_hax.Curve25519.fe_mul den1 den2))
+      t0);
+  let ix0 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      x0
+      (← (sqrt_m1 Rust_primitives.Hax.Tuple0.mk)));
+  let iy0 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      y0
+      (← (sqrt_m1 Rust_primitives.Hax.Tuple0.mk)));
+  let enchanted_denominator : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      den1
+      (← (invsqrt_a_minus_d Rust_primitives.Hax.Tuple0.mk)));
+  let rotate : u64 ←
+    (fe_is_negative (← (Libcrux_specs_hax.Curve25519.fe_mul t0 z_inv)));
+  let x : (RustArray u64 5) ← (fe_select rotate iy0 x0);
+  let y : (RustArray u64 5) ← (fe_select rotate ix0 y0);
+  let z : (RustArray u64 5) := z0;
+  let den_inv : (RustArray u64 5) ←
+    (fe_select rotate enchanted_denominator den2);
+  let y : (RustArray u64 5) ←
+    (fe_select
+      (← (fe_is_negative (← (Libcrux_specs_hax.Curve25519.fe_mul x z_inv))))
+      (← (fe_neg y))
+      y);
+  let s : (RustArray u64 5) ←
+    (fe_abs
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        den_inv
+        (← (Libcrux_specs_hax.Curve25519.fe_sub z y)))));
+  (Libcrux_specs_hax.Curve25519.fe_to_bytes s)
+
+--  Equals (RFC 9496, Section 4.3.3): true exactly when the two internal
+--  representations stand for the same group element, that is when
+--  x1 * y2 = y1 * x2 or y1 * y2 = x1 * x2.
+def equals
+    (p : Libcrux_specs_hax.Edwards25519.EdPoint)
+    (q : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM Bool := do
+  let a : u64 ←
+    (fe_ct_eq
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        (Libcrux_specs_hax.Edwards25519.EdPoint.x p)
+        (Libcrux_specs_hax.Edwards25519.EdPoint.y q)))
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        (Libcrux_specs_hax.Edwards25519.EdPoint.y p)
+        (Libcrux_specs_hax.Edwards25519.EdPoint.x q))));
+  let b : u64 ←
+    (fe_ct_eq
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        (Libcrux_specs_hax.Edwards25519.EdPoint.y p)
+        (Libcrux_specs_hax.Edwards25519.EdPoint.y q)))
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        (Libcrux_specs_hax.Edwards25519.EdPoint.x p)
+        (Libcrux_specs_hax.Edwards25519.EdPoint.x q))));
+  (Rust_primitives.Hax.Machine_int.eq
+    (← (Rust_primitives.Hax.Machine_int.bitor a b))
+    (1 : u64))
+
+--  MAP (RFC 9496, Section 4.3.4): the Elligator-based map from a 32-byte
+--  string to an internal representation.
+-- 
+--  Step 1 is performed by `fe_from_bytes`, which masks the most significant
+--  bit of the final byte and accepts non-canonical values; the limb
+--  representation of r stands for t = r mod p.
+def elligator_map (bytes : (RustArray u8 32)) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  let t : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_from_bytes bytes);
+  let one : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_one Rust_primitives.Hax.Tuple0.mk);
+  let minus_one : (RustArray u64 5) ← (fe_neg one);
+  let dd : (RustArray u64 5) ← (d Rust_primitives.Hax.Tuple0.mk);
+  let r : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (sqrt_m1 Rust_primitives.Hax.Tuple0.mk))
+      (← (Libcrux_specs_hax.Curve25519.fe_sq t)));
+  let u : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (Libcrux_specs_hax.Curve25519.fe_add r one))
+      (← (one_minus_d_sq Rust_primitives.Hax.Tuple0.mk)));
+  let v : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (Libcrux_specs_hax.Curve25519.fe_sub
+        minus_one
+        (← (Libcrux_specs_hax.Curve25519.fe_mul r dd))))
+      (← (Libcrux_specs_hax.Curve25519.fe_add r dd)));
+  let ⟨was_square, s⟩ ← (sqrt_ratio_m1 u v);
+  let s_prime : (RustArray u64 5) ←
+    (fe_neg (← (fe_abs (← (Libcrux_specs_hax.Curve25519.fe_mul s t)))));
+  let s : (RustArray u64 5) ← (fe_select was_square s s_prime);
+  let c : (RustArray u64 5) ← (fe_select was_square minus_one r);
+  let n : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_sub
+      (← (Libcrux_specs_hax.Curve25519.fe_mul
+        (← (Libcrux_specs_hax.Curve25519.fe_mul
+          c
+          (← (Libcrux_specs_hax.Curve25519.fe_sub r one))))
+        (← (d_minus_one_sq Rust_primitives.Hax.Tuple0.mk))))
+      v);
+  let s_sq : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sq s);
+  let w0 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      (← (Libcrux_specs_hax.Curve25519.fe_add s s))
+      v);
+  let w1 : (RustArray u64 5) ←
+    (Libcrux_specs_hax.Curve25519.fe_mul
+      n
+      (← (sqrt_ad_minus_one Rust_primitives.Hax.Tuple0.mk)));
+  let w2 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_sub one s_sq);
+  let w3 : (RustArray u64 5) ← (Libcrux_specs_hax.Curve25519.fe_add one s_sq);
+  (pure (Libcrux_specs_hax.Edwards25519.EdPoint.mk
+    (x := (← (Libcrux_specs_hax.Curve25519.fe_mul w0 w3)))
+    (y := (← (Libcrux_specs_hax.Curve25519.fe_mul w2 w1)))
+    (z := (← (Libcrux_specs_hax.Curve25519.fe_mul w1 w3)))
+    (t := (← (Libcrux_specs_hax.Curve25519.fe_mul w0 w2)))))
+
+--  Element derivation (RFC 9496, Section 4.3.4): `MAP(b[0:32]) + MAP(b[32:64])`
+--  for a 64-byte string b.
+def from_uniform_bytes (b : (RustArray u8 64)) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  let b1 : (RustArray u8 32) ←
+    (Rust_primitives.Hax.repeat (0 : u8) (32 : usize));
+  let b2 : (RustArray u8 32) ←
+    (Rust_primitives.Hax.repeat (0 : u8) (32 : usize));
+  let ⟨b1, b2⟩ ←
+    (Rust_primitives.Hax.Folds.fold_range
+      (0 : usize)
+      (32 : usize)
+      (fun ⟨b1, b2⟩ _ => (do (pure true) : RustM Bool))
+      (Rust_primitives.Hax.Tuple2.mk b1 b2)
+      (fun ⟨b1, b2⟩ i =>
+        (do
+        let b1 : (RustArray u8 32) ←
+          (Rust_primitives.Hax.Monomorphized_update_at.update_at_usize
+            b1
+            i
+            (← b[i]_?));
+        let b2 : (RustArray u8 32) ←
+          (Rust_primitives.Hax.Monomorphized_update_at.update_at_usize
+            b2
+            i
+            (← b[(← ((32 : usize) +? i))]_?));
+        (pure (Rust_primitives.Hax.Tuple2.mk b1 b2)) :
+        RustM
+        (Rust_primitives.Hax.Tuple2 (RustArray u8 32) (RustArray u8 32)))));
+  let p1 : Libcrux_specs_hax.Edwards25519.EdPoint ← (elligator_map b1);
+  let p2 : Libcrux_specs_hax.Edwards25519.EdPoint ← (elligator_map b2);
+  (Libcrux_specs_hax.Edwards25519.point_add p1 p2)
+
+--  The identity element, represented by the edwards25519 neutral point.
+def identity (_ : Rust_primitives.Hax.Tuple0) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  (Libcrux_specs_hax.Edwards25519.point_identity Rust_primitives.Hax.Tuple0.mk)
+
+--  The canonical generator (RFC 9496, Section 4), represented by the
+--  Curve25519 base point.
+def generator (_ : Rust_primitives.Hax.Tuple0) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  (Libcrux_specs_hax.Edwards25519.ed25519_base_point
+    Rust_primitives.Hax.Tuple0.mk)
+
+--  Element addition, applied to the internal representations.
+def element_add
+    (p : Libcrux_specs_hax.Edwards25519.EdPoint)
+    (q : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  (Libcrux_specs_hax.Edwards25519.point_add p q)
+
+--  Element negation: (x, y, z, t) maps to (-x, y, z, -t).
+def element_neg (p : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  (pure (Libcrux_specs_hax.Edwards25519.EdPoint.mk
+    (x := (← (fe_neg (Libcrux_specs_hax.Edwards25519.EdPoint.x p))))
+    (y := (Libcrux_specs_hax.Edwards25519.EdPoint.y p))
+    (z := (Libcrux_specs_hax.Edwards25519.EdPoint.z p))
+    (t := (← (fe_neg (Libcrux_specs_hax.Edwards25519.EdPoint.t p))))))
+
+--  Element subtraction: p + (-q).
+def element_sub
+    (p : Libcrux_specs_hax.Edwards25519.EdPoint)
+    (q : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  (Libcrux_specs_hax.Edwards25519.point_add p (← (element_neg q)))
+
+--  Element doubling, applied to the internal representation.
+def element_double (p : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  (Libcrux_specs_hax.Edwards25519.point_double p)
+
+--  Scalar multiplication by a secret 32-byte little-endian scalar
+--  (RFC 9496, Section 4.4).
+-- 
+--  `edwards25519::scalar_mult` is a double-and-add that branches on the bits of
+--  its scalar, so this function releases the scalar to it. It specifies the
+--  value of the product; it is not a constant-time algorithm.
+def element_mul
+    (scalar : Libcrux_specs_hax.Secret.Scalar)
+    (p : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  (Libcrux_specs_hax.Edwards25519.scalar_mult
+    (← (Libcrux_specs_hax.Secret.Impl.declassify scalar))
+    p)
+
+end Libcrux_specs_hax.Ristretto255
 
 
 namespace Libcrux_specs_hax.Ed25519
@@ -10568,6 +13031,248 @@ def ed25519_verify
 end Libcrux_specs_hax.Ed25519
 
 
+namespace Libcrux_specs_hax.Ed25519_comb
+
+--  Entries in a table row: one per value of a 4-bit digit.
+def COMB_ENTRIES : usize := (16 : usize)
+
+--  Rows in the table: one per digit of a 256-bit scalar.
+def COMB_WINDOWS : usize := (64 : usize)
+
+--  Digit `i` of the scalar in radix 16, that is `k / 16^i % 16`.
+-- 
+--  The scalar is 32 bytes little-endian, so digit `i` is a nibble of byte
+--  `i / 2`: the low nibble for even `i`, the high nibble for odd `i`. The
+--  index arithmetic depends on `i` alone.
+def comb_digit (k : (RustArray u8 32)) (i : usize) : RustM usize := do
+  let byte : u8 ← k[(← (i /? (2 : usize)))]_?;
+  let shifted : u8 ←
+    if
+    (← (Rust_primitives.Hax.Machine_int.eq (← (i %? (2 : usize))) (0 : usize)))
+    then
+      (pure byte)
+    else
+      (byte >>>? (4 : i32));
+  (Rust_primitives.Hax.cast_op (← (shifted &&&? (15 : u8))))
+
+--  `16 · p`, by four doublings.
+def point_mul16 (p : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  let p2 : Libcrux_specs_hax.Edwards25519.EdPoint ←
+    (Libcrux_specs_hax.Edwards25519.point_double p);
+  let p4 : Libcrux_specs_hax.Edwards25519.EdPoint ←
+    (Libcrux_specs_hax.Edwards25519.point_double p2);
+  let p8 : Libcrux_specs_hax.Edwards25519.EdPoint ←
+    (Libcrux_specs_hax.Edwards25519.point_double p4);
+  (Libcrux_specs_hax.Edwards25519.point_double p8)
+
+--  Row `i` of the comb table of `base`: the sixteen multiples
+--  `(d · 16^i) · base` for `d < 16`, in order of `d`.
+-- 
+--  `weight` is `(16^i) · base`; entry `d` is the running sum of `d` copies of
+--  it, so entry `0` is the identity.
+def comb_row_from_weight (weight : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM
+    (Alloc.Vec.Vec Libcrux_specs_hax.Edwards25519.EdPoint Alloc.Alloc.Global)
+    := do
+  let
+    row : (Alloc.Vec.Vec
+      Libcrux_specs_hax.Edwards25519.EdPoint
+      Alloc.Alloc.Global) ←
+    (Alloc.Vec.Impl.new Libcrux_specs_hax.Edwards25519.EdPoint
+      Rust_primitives.Hax.Tuple0.mk);
+  let acc : Libcrux_specs_hax.Edwards25519.EdPoint ←
+    (Libcrux_specs_hax.Edwards25519.point_identity
+      Rust_primitives.Hax.Tuple0.mk);
+  let d : usize := (0 : usize);
+  let ⟨acc, d, row⟩ ←
+    (Rust_primitives.Hax.while_loop
+      (fun ⟨acc, d, row⟩ => (do (pure true) : RustM Bool))
+      (fun ⟨acc, d, row⟩ =>
+        (do (Rust_primitives.Hax.Machine_int.lt d COMB_ENTRIES) : RustM Bool))
+      (fun ⟨acc, d, row⟩ =>
+        (do
+        (Rust_primitives.Hax.Int.from_machine (0 : u32)) :
+        RustM Hax_lib.Int.Int))
+      (Rust_primitives.Hax.Tuple3.mk acc d row)
+      (fun ⟨acc, d, row⟩ =>
+        (do
+        let
+          row : (Alloc.Vec.Vec
+            Libcrux_specs_hax.Edwards25519.EdPoint
+            Alloc.Alloc.Global) ←
+          (Alloc.Vec.Impl_1.push
+            Libcrux_specs_hax.Edwards25519.EdPoint
+            Alloc.Alloc.Global row acc);
+        let acc : Libcrux_specs_hax.Edwards25519.EdPoint ←
+          (Libcrux_specs_hax.Edwards25519.point_add acc weight);
+        let d : usize ← (d +? (1 : usize));
+        (pure (Rust_primitives.Hax.Tuple3.mk acc d row)) :
+        RustM
+        (Rust_primitives.Hax.Tuple3
+          Libcrux_specs_hax.Edwards25519.EdPoint
+          usize
+          (Alloc.Vec.Vec
+            Libcrux_specs_hax.Edwards25519.EdPoint
+            Alloc.Alloc.Global)))));
+  (pure row)
+
+--  The comb table of `base`, row-major: entry `COMB_ENTRIES * i + d` is
+--  `(d · 16^i) · base`, for `i < 64` and `d < 16`.
+def comb_table (base : Libcrux_specs_hax.Edwards25519.EdPoint) :
+    RustM
+    (Alloc.Vec.Vec Libcrux_specs_hax.Edwards25519.EdPoint Alloc.Alloc.Global)
+    := do
+  let
+    table : (Alloc.Vec.Vec
+      Libcrux_specs_hax.Edwards25519.EdPoint
+      Alloc.Alloc.Global) ←
+    (Alloc.Vec.Impl.new Libcrux_specs_hax.Edwards25519.EdPoint
+      Rust_primitives.Hax.Tuple0.mk);
+  let weight : Libcrux_specs_hax.Edwards25519.EdPoint := base;
+  let i : usize := (0 : usize);
+  let ⟨i, table, weight⟩ ←
+    (Rust_primitives.Hax.while_loop
+      (fun ⟨i, table, weight⟩ => (do (pure true) : RustM Bool))
+      (fun ⟨i, table, weight⟩ =>
+        (do (Rust_primitives.Hax.Machine_int.lt i COMB_WINDOWS) : RustM Bool))
+      (fun ⟨i, table, weight⟩ =>
+        (do
+        (Rust_primitives.Hax.Int.from_machine (0 : u32)) :
+        RustM Hax_lib.Int.Int))
+      (Rust_primitives.Hax.Tuple3.mk i table weight)
+      (fun ⟨i, table, weight⟩ =>
+        (do
+        let
+          row : (Alloc.Vec.Vec
+            Libcrux_specs_hax.Edwards25519.EdPoint
+            Alloc.Alloc.Global) ←
+          (comb_row_from_weight weight);
+        let d : usize := (0 : usize);
+        let ⟨d, table⟩ ←
+          (Rust_primitives.Hax.while_loop
+            (fun ⟨d, table⟩ => (do (pure true) : RustM Bool))
+            (fun ⟨d, table⟩ =>
+              (do
+              (Rust_primitives.Hax.Machine_int.lt d COMB_ENTRIES) : RustM Bool))
+            (fun ⟨d, table⟩ =>
+              (do
+              (Rust_primitives.Hax.Int.from_machine (0 : u32)) :
+              RustM Hax_lib.Int.Int))
+            (Rust_primitives.Hax.Tuple2.mk d table)
+            (fun ⟨d, table⟩ =>
+              (do
+              let
+                table : (Alloc.Vec.Vec
+                  Libcrux_specs_hax.Edwards25519.EdPoint
+                  Alloc.Alloc.Global) ←
+                (Alloc.Vec.Impl_1.push
+                  Libcrux_specs_hax.Edwards25519.EdPoint
+                  Alloc.Alloc.Global table (← row[d]_?));
+              let d : usize ← (d +? (1 : usize));
+              (pure (Rust_primitives.Hax.Tuple2.mk d table)) :
+              RustM
+              (Rust_primitives.Hax.Tuple2
+                usize
+                (Alloc.Vec.Vec
+                  Libcrux_specs_hax.Edwards25519.EdPoint
+                  Alloc.Alloc.Global)))));
+        let weight : Libcrux_specs_hax.Edwards25519.EdPoint ←
+          (point_mul16 weight);
+        let i : usize ← (i +? (1 : usize));
+        (pure (Rust_primitives.Hax.Tuple3.mk i table weight)) :
+        RustM
+        (Rust_primitives.Hax.Tuple3
+          usize
+          (Alloc.Vec.Vec
+            Libcrux_specs_hax.Edwards25519.EdPoint
+            Alloc.Alloc.Global)
+          Libcrux_specs_hax.Edwards25519.EdPoint))));
+  (pure table)
+
+--  Entry `d` of row `i`, read by a full scan of the row.
+-- 
+--  Every entry of the row is read, in order, and the accumulator keeps the one
+--  whose index is `d`. The access pattern does not depend on `d`, and an out of
+--  range `d` yields the identity.
+def comb_select
+    (table : (RustSlice Libcrux_specs_hax.Edwards25519.EdPoint))
+    (i : usize)
+    (d : usize) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  let acc : Libcrux_specs_hax.Edwards25519.EdPoint ←
+    (Libcrux_specs_hax.Edwards25519.point_identity
+      Rust_primitives.Hax.Tuple0.mk);
+  let base : usize ← (COMB_ENTRIES *? i);
+  let j : usize := (0 : usize);
+  let ⟨acc, j⟩ ←
+    (Rust_primitives.Hax.while_loop
+      (fun ⟨acc, j⟩ => (do (pure true) : RustM Bool))
+      (fun ⟨acc, j⟩ =>
+        (do (Rust_primitives.Hax.Machine_int.lt j COMB_ENTRIES) : RustM Bool))
+      (fun ⟨acc, j⟩ =>
+        (do
+        (Rust_primitives.Hax.Int.from_machine (0 : u32)) :
+        RustM Hax_lib.Int.Int))
+      (Rust_primitives.Hax.Tuple2.mk acc j)
+      (fun ⟨acc, j⟩ =>
+        (do
+        let acc : Libcrux_specs_hax.Edwards25519.EdPoint ←
+          if (← (Rust_primitives.Hax.Machine_int.eq j d)) then
+            let acc : Libcrux_specs_hax.Edwards25519.EdPoint ←
+              table[(← (base +? j))]_?;
+            (pure acc)
+          else
+            (pure acc);
+        let j : usize ← (j +? (1 : usize));
+        (pure (Rust_primitives.Hax.Tuple2.mk acc j)) :
+        RustM
+        (Rust_primitives.Hax.Tuple2
+          Libcrux_specs_hax.Edwards25519.EdPoint
+          usize))));
+  (pure acc)
+
+--  `k · base` for the 32-byte little-endian scalar `k`, over the comb table of
+--  `base`, by one scan and one addition per window.
+-- 
+--  The accumulator starts at the identity and window `i` adds the entry its
+--  digit selects, which is `combTrips` run to sixty-four.
+def comb_walk
+    (table : (RustSlice Libcrux_specs_hax.Edwards25519.EdPoint))
+    (k : (RustArray u8 32)) :
+    RustM Libcrux_specs_hax.Edwards25519.EdPoint := do
+  let acc : Libcrux_specs_hax.Edwards25519.EdPoint ←
+    (Libcrux_specs_hax.Edwards25519.point_identity
+      Rust_primitives.Hax.Tuple0.mk);
+  let i : usize := (0 : usize);
+  let ⟨acc, i⟩ ←
+    (Rust_primitives.Hax.while_loop
+      (fun ⟨acc, i⟩ => (do (pure true) : RustM Bool))
+      (fun ⟨acc, i⟩ =>
+        (do (Rust_primitives.Hax.Machine_int.lt i COMB_WINDOWS) : RustM Bool))
+      (fun ⟨acc, i⟩ =>
+        (do
+        (Rust_primitives.Hax.Int.from_machine (0 : u32)) :
+        RustM Hax_lib.Int.Int))
+      (Rust_primitives.Hax.Tuple2.mk acc i)
+      (fun ⟨acc, i⟩ =>
+        (do
+        let d : usize ← (comb_digit k i);
+        let entry : Libcrux_specs_hax.Edwards25519.EdPoint ←
+          (comb_select table i d);
+        let acc : Libcrux_specs_hax.Edwards25519.EdPoint ←
+          (Libcrux_specs_hax.Edwards25519.point_add acc entry);
+        let i : usize ← (i +? (1 : usize));
+        (pure (Rust_primitives.Hax.Tuple2.mk acc i)) :
+        RustM
+        (Rust_primitives.Hax.Tuple2
+          Libcrux_specs_hax.Edwards25519.EdPoint
+          usize))));
+  (pure acc)
+
+end Libcrux_specs_hax.Ed25519_comb
+
+
 namespace Libcrux_specs_hax.Ecdsa_p256
 
 --  Check if a scalar (mod n) is zero.
@@ -10897,8 +13602,9 @@ end Libcrux_specs_hax.Ecdsa_p256
 
 namespace Libcrux_specs_hax
 
---  Fixed-length wrappers for the Lean extraction bridge.
---  These match the opaque declarations in Libcrux_specs.lean.
+--  Fixed-length (32-byte) wrappers over the primitive modules, so that
+--  downstream code and extraction tooling can be generic over the
+--  implementation.
 class LibcruxCrypto.AssociatedTypes (Self : Type) where
 
 class LibcruxCrypto (Self : Type)

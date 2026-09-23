@@ -5,6 +5,8 @@
 //!
 //! No external dependencies. Uses `crate::sha256::sha256` for the hash function.
 
+use alloc::vec::Vec;
+
 use crate::sha256::sha256;
 
 /// HMAC block size for SHA-256 (512 bits = 64 bytes).
